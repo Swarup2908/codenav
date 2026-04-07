@@ -1,0 +1,2 @@
+[console_scripts]
+server = codenav.server.app:main

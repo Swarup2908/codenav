@@ -1,0 +1,84 @@
+spec_version: 1
+name: codenav
+type: space
+runtime: fastapi
+app: server.app:app
+port: 8000
+
+title: "CodeNav — Developer Workflow RL Environment"
+description: >
+  An RL environment where an agent acts as a software developer dropped into
+  an unfamiliar Python codebase. The agent must read, diagnose, act, verify,
+  and submit — rewarded for the quality of the entire reasoning process,
+  not just the final output.
+readme: README.md
+version: "1.0.0"
+author: "codenav-team"
+
+tags:
+  - code
+  - software-engineering
+  - reasoning
+  - debugging
+  - developer-workflow
+  - real-world
+
+tasks:
+  - id: easy
+    description: "Single file, obvious bug, no cross-file dependencies"
+    difficulty: easy
+    max_steps: 20
+
+  - id: medium
+    description: "Two files, non-obvious bug, one cross-file dependency"
+    difficulty: medium
+    max_steps: 30
+
+  - id: hard
+    description: "Four files, subtle silent bug, cascading dependencies"
+    difficulty: hard
+    max_steps: 40
+
+action_space:
+  type: CodeNavAction
+  actions:
+    - read_file
+    - read_function
+    - search_codebase
+    - submit_diagnosis
+    - identify_location
+    - edit_code
+    - add_code
+    - delete_code
+    - run_tests
+    - trace_execution
+    - submit
+
+observation_space:
+  type: CodeNavObservation
+  always_present:
+    - success
+    - message
+    - current_step
+    - max_steps
+    - available_files
+    - files_read
+    - edits_made
+    - diagnosis_submitted
+    - tests_run
+
+reward:
+  range: [-1.0, 1.0]
+  type: dense
+  dimensions:
+    - reading
+    - diagnosis
+    - edit
+    - verification
+    - efficiency
+
+environment_variables:
+  CODENAV_TASK:
+    description: "Which task to run: easy, medium, or hard"
+    default: "easy"
+    required: false

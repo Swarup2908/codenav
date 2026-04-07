@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: openenv-codenav
+Version: 1.0.0
+Summary: CodeNav — Developer Workflow RL Environment for OpenEnv
+Requires-Python: >=3.10
+Requires-Dist: openenv-core[core]>=0.2.2
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
+Provides-Extra: baseline
+Requires-Dist: openai>=1.0.0; extra == "baseline"

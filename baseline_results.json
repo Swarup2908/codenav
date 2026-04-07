@@ -1,0 +1,55 @@
+{
+  "model": "llama-3.3-70b-versatile",
+  "timestamp": "2026-04-06T18:29:26Z",
+  "summary": {
+    "hard": {
+      "episodes": 1,
+      "scores": [
+        0.0
+      ],
+      "average": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    }
+  },
+  "episodes": [
+    {
+      "task_id": "hard",
+      "scenario_id": "hard_6",
+      "model": "llama-3.3-70b-versatile",
+      "final_score": 0.0,
+      "score_breakdown": null,
+      "steps_taken": 26,
+      "actions": [
+        "read_file",
+        "read_file",
+        "submit_diagnosis",
+        "edit_code",
+        "read_file",
+        "edit_code",
+        "run_tests",
+        "read_function",
+        "submit_diagnosis",
+        "edit_code",
+        "run_tests",
+        "read_file",
+        "read_function",
+        "read_function",
+        "search_codebase",
+        "read_function",
+        "read_function",
+        "submit_diagnosis",
+        "read_file",
+        "read_file",
+        "submit_diagnosis",
+        "read_function",
+        "submit_diagnosis",
+        "read_function",
+        "submit_diagnosis",
+        "read_file"
+      ],
+      "parse_errors": 0,
+      "success": false
+    }
+  ]
+}
