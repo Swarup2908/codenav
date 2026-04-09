@@ -3234,18 +3234,26 @@ def get_scenario(task_id: str, index: Optional[int] = None) -> dict:
     """
     Get a scenario for a given difficulty level.
 
-    Args:
-        task_id: one of 'easy', 'medium', 'hard'
-        index: specific scenario index (0-based). If None, picks randomly.
-
-    Returns:
-        scenario dict with all task fields
+    For easy tasks with no pinned index, uses the procedural generator
+    50% of the time — giving effectively unlimited scenario variety.
+    For medium and hard, always draws from the fixed pool.
     """
     if task_id not in SCENARIO_POOLS:
         raise ValueError(f"task_id must be one of {list(SCENARIO_POOLS.keys())}")
+
     pool = SCENARIO_POOLS[task_id]
+
     if index is not None:
         return pool[index % len(pool)]
+
+    # For easy tasks, use procedural generator 50% of the time
+    if task_id == "easy" and random.random() < 0.5:
+        try:
+            from scenario_generator import generate_easy_scenario
+            return generate_easy_scenario()
+        except ImportError:
+            pass
+
     return random.choice(pool)
 
 
