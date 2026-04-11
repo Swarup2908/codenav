@@ -1,25 +1,23 @@
 """
 CodeNav Inference Script — OpenEnv Hackathon Submission
 
+Connects to the CodeNav environment via WebSocket (persistent session).
+
 Environment variables:
     API_BASE_URL      LLM endpoint (default: https://router.huggingface.co/v1)
     MODEL_NAME        Model identifier (default: Qwen/Qwen2.5-72B-Instruct)
     HF_TOKEN          Hugging Face API key (required)
-    CODENAV_SPACE_URL CodeNav HF Space URL (default: https://swarup29-codenav.hf.space)
+    CODENAV_SPACE_URL CodeNav Space URL (default: https://swarup29-codenav.hf.space)
 """
 
+import asyncio
 import json
 import os
 import sys
 import textwrap
 from typing import List, Optional
 
-import requests
 from openai import OpenAI
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME   = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
@@ -38,7 +36,6 @@ MAX_TOKENS       = 1024
 def log_start(task: str, env: str, model: str) -> None:
     print(f"[START] task={task} env={env} model={model}", flush=True)
 
-
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     print(
         f"[STEP] step={step} action={action} reward={reward:.3f} "
@@ -46,11 +43,11 @@ def log_step(step: int, action: str, reward: float, done: bool, error: Optional[
         flush=True,
     )
 
-
 def log_end(success: bool, steps: int, rewards: List[float]) -> None:
+    safe = [max(0.001, min(0.999, r)) for r in rewards] if rewards else [0.001]
     print(
         f"[END] success={str(success).lower()} steps={steps} "
-        f"rewards={','.join(f'{r:.3f}' for r in rewards)}",
+        f"rewards={','.join(f'{r:.3f}' for r in safe)}",
         flush=True,
     )
 
@@ -144,7 +141,7 @@ def trim(messages: list, keep: int = 6) -> list:
     return messages[:2] + [{"role": "user", "content": "[Earlier conversation trimmed.]"}] + messages[-(keep * 2):]
 
 
-def parse(text: str) -> Optional[dict]:
+def parse_action(text: str) -> Optional[dict]:
     text = text.strip()
     if text.startswith("```"):
         lines = text.split("\n")
@@ -158,25 +155,145 @@ def parse(text: str) -> Optional[dict]:
         return None
 
 
+def ws_url(http_url: str) -> str:
+    """Convert http(s) URL to ws(s) URL for WebSocket connection."""
+    return http_url.replace("https://", "wss://").replace("http://", "ws://")
+
+
 # ---------------------------------------------------------------------------
-# Episode runner
+# Episode runner — WebSocket based (persistent session, no replica issues)
 # ---------------------------------------------------------------------------
 
-def run_episode(client: OpenAI, task_id: str) -> dict:
+async def run_episode_async(client: OpenAI, task_id: str) -> dict:
+    try:
+        import websockets
+    except ImportError:
+        print("[DEBUG] websockets not installed, falling back to HTTP", file=sys.stderr, flush=True)
+        return await run_episode_http(client, task_id)
+
     rewards: List[float] = []
     final_score = 0.001
     steps_taken = 0
     success = False
     parse_errors = 0
 
-    # Reset
+    ws_endpoint = ws_url(SPACE_URL) + "/ws"
+
     try:
-        resp = requests.post(f"{SPACE_URL}/reset", json={"task_id": task_id}, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+        async with websockets.connect(ws_endpoint, ping_interval=20, ping_timeout=60) as ws:
+            # Reset
+            await ws.send(json.dumps({"type": "reset", "data": {"task_id": task_id}}))
+            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
+
+            if resp.get("type") == "error":
+                print(f"[DEBUG] Reset error: {resp}", file=sys.stderr, flush=True)
+                log_end(False, 0, [0.001])
+                return {"final_score": 0.001, "steps_taken": 0, "rewards": [], "success": False}
+
+            obs = resp.get("data", {}).get("observation", {})
+            max_steps = obs.get("max_steps", 25)
+
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": build_prompt(obs, 0)},
+            ]
+
+            while True:
+                response_text = get_action(client, trim(messages))
+                action_dict = parse_action(response_text)
+
+                if action_dict is None:
+                    parse_errors += 1
+                    messages.append({"role": "assistant", "content": response_text})
+                    messages.append({"role": "user", "content": "ERROR: Invalid JSON. Respond with ONLY a JSON object."})
+                    log_step(steps_taken + 1, "parse_error", 0.001, False, "invalid_json")
+                    if parse_errors >= MAX_PARSE_ERRORS:
+                        break
+                    continue
+
+                parse_errors = 0
+                steps_taken += 1
+
+                # Send action via WebSocket
+                await ws.send(json.dumps({"type": "step", "data": action_dict}))
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
+
+                if resp.get("type") == "error":
+                    err_msg = resp.get("data", {}).get("message", "ws_error")[:80]
+                    log_step(steps_taken, action_dict.get("action_type", "unknown"), 0.001, True, err_msg)
+                    break
+
+                data = resp.get("data", {})
+                obs = data.get("observation", {})
+                reward = max(0.001, float(data.get("reward", 0.001) or 0.001))
+                done = bool(data.get("done", False))
+
+                if obs.get("final_score") is not None:
+                    reward = float(obs["final_score"])
+                    final_score = reward
+                    success = final_score > 0
+
+                rewards.append(reward)
+
+                action_str = action_dict.get("action_type", "unknown")
+                if action_dict.get("filename"):
+                    action_str += f"({action_dict['filename']})"
+
+                error_msg = None
+                if not obs.get("success", True) and action_dict.get("action_type") != "submit":
+                    error_msg = str(obs.get("message", ""))[:80].replace("\n", " ")
+
+                log_step(steps_taken, action_str, reward, done, error_msg)
+
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append({"role": "user", "content": build_prompt(obs, steps_taken)})
+
+                if done or action_dict.get("action_type") == "submit":
+                    break
+
+                max_steps = obs.get("max_steps", max_steps)
+                if steps_taken >= max_steps:
+                    log_step(steps_taken + 1, "timeout", 0.001, True, "max_steps_reached")
+                    break
+
     except Exception as e:
-        print(f"[DEBUG] Reset failed: {e}", file=sys.stderr, flush=True)
-        log_end(False, 0, [])
+        print(f"[DEBUG] WebSocket error: {e}", file=sys.stderr, flush=True)
+        if steps_taken == 0:
+            log_end(False, 0, [0.001])
+            return {"final_score": 0.001, "steps_taken": 0, "rewards": [], "success": False}
+
+    return {"final_score": final_score, "steps_taken": steps_taken, "rewards": rewards, "success": success}
+
+
+async def run_episode_http(client: OpenAI, task_id: str) -> dict:
+    """Fallback: plain HTTP if websockets not available."""
+    import urllib.request
+    import urllib.error
+
+    rewards: List[float] = []
+    final_score = 0.001
+    steps_taken = 0
+    success = False
+    parse_errors = 0
+
+    def http_post(path: str, body: dict) -> Optional[dict]:
+        try:
+            data = json.dumps(body).encode()
+            req = urllib.request.Request(
+                f"{SPACE_URL}{path}",
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return json.loads(r.read())
+        except Exception as e:
+            print(f"[DEBUG] HTTP error {path}: {e}", file=sys.stderr, flush=True)
+            return None
+
+    data = http_post("/reset", {"task_id": task_id})
+    if not data:
+        log_end(False, 0, [0.001])
         return {"final_score": 0.001, "steps_taken": 0, "rewards": [], "success": False}
 
     obs = data.get("observation", {})
@@ -189,7 +306,7 @@ def run_episode(client: OpenAI, task_id: str) -> dict:
 
     while True:
         response_text = get_action(client, trim(messages))
-        action_dict = parse(response_text)
+        action_dict = parse_action(response_text)
 
         if action_dict is None:
             parse_errors += 1
@@ -203,16 +320,13 @@ def run_episode(client: OpenAI, task_id: str) -> dict:
         parse_errors = 0
         steps_taken += 1
 
-        try:
-            resp = requests.post(f"{SPACE_URL}/step", json={"action": action_dict}, timeout=60)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            log_step(steps_taken, action_dict.get("action_type", "unknown"), 0.001, True, str(e)[:80])
+        data = http_post("/step", {"action": action_dict})
+        if not data:
+            log_step(steps_taken, action_dict.get("action_type", "unknown"), 0.001, True, "http_error")
             break
 
         obs = data.get("observation", {})
-        reward = max(0.001, float(data.get("reward", 0.001)))
+        reward = max(0.001, float(data.get("reward", 0.001) or 0.001))
         done = bool(data.get("done", False))
 
         if obs.get("final_score") is not None:
@@ -246,6 +360,10 @@ def run_episode(client: OpenAI, task_id: str) -> dict:
     return {"final_score": final_score, "steps_taken": steps_taken, "rewards": rewards, "success": success}
 
 
+def run_episode(client: OpenAI, task_id: str) -> dict:
+    return asyncio.run(run_episode_async(client, task_id))
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -260,8 +378,11 @@ def main() -> None:
     for task_id in ["easy", "medium", "hard"]:
         log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
         result = run_episode(client=client, task_id=task_id)
-        clamped_rewards = [max(0.001, min(0.999, r)) for r in result["rewards"]] if result["rewards"] else [0.001]
-        log_end(success=result["success"], steps=result["steps_taken"], rewards=clamped_rewards)
+        log_end(
+            success=result["success"],
+            steps=result["steps_taken"],
+            rewards=result["rewards"],
+        )
 
 
 if __name__ == "__main__":
