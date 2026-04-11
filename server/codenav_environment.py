@@ -186,7 +186,7 @@ class CodeNavEnvironment(Environment):
             diagnosis_submitted=False,
             tests_run=False,
             done=False,
-            reward=0.0,
+            reward=0.001,
         )
 
     def step(self, action: CodeNavAction) -> CodeNavObservation:
@@ -563,7 +563,7 @@ class CodeNavEnvironment(Environment):
             diagnosis_submitted=diag,
             tests_run=tests,
             done=kwargs.pop("done", False),
-            reward=kwargs.pop("reward", 0.0),
+            reward=kwargs.pop("reward", 0.001),
             **kwargs,
         )
 
