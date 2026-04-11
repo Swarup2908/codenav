@@ -28,7 +28,7 @@ except ImportError:
 
 def _clamp(score: float) -> float:
     """Clamp score to strictly (0, 1) — never exactly 0.0 or 1.0."""
-    return round(max(0.001, min(0.999, float(score))), 3)
+    return round(max(0.11, min(0.89, float(score))), 3)
 
 
 class RewardComputer:
@@ -55,13 +55,13 @@ class RewardComputer:
     BRUTE_FORCE_READ_PENALTY = -0.05
     WRONG_DIAGNOSIS = -0.05
     FIX_BROKE_TESTS = -0.08
-    SUBMIT_WITHOUT_VERIFY = -0.05
+    SUBMIT_WITHOUT_VERIFY = -0.03
     HIT_MAX_STEPS = -0.05
 
     def compute_final_reward(self, state, task):
         breakdown = {}
 
-        read_score = 0.0
+        read_score = self.BASE_SCORE
         for f in state.relevant_files_read:
             read_score += self.RELEVANT_FILE_READ
         for f in state.irrelevant_files_read:
@@ -71,28 +71,28 @@ class RewardComputer:
         breakdown["reading"] = round(read_score, 3)
 
         if not state.diagnosis_submitted:
-            diag = self.NO_DIAGNOSIS
+            diag = self.BASE_SCORE + self.NO_DIAGNOSIS
         elif state.diagnosis_correct:
-            diag = self.CORRECT_DIAGNOSIS_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAGNOSIS_LATE
+            diag = self.BASE_SCORE + (self.CORRECT_DIAGNOSIS_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAGNOSIS_LATE)
         elif state.diagnosis_partial:
-            diag = self.PARTIAL_DIAGNOSIS
+            diag = self.BASE_SCORE + self.PARTIAL_DIAGNOSIS
         else:
-            diag = self.WRONG_DIAGNOSIS
+            diag = self.BASE_SCORE + self.WRONG_DIAGNOSIS
         breakdown["diagnosis"] = round(diag, 3)
 
-        edit = 0.0
+        edit = self.BASE_SCORE
         if state.edit_correct is not None:
             if state.edit_correct and state.edit_minimal:
-                edit = self.CORRECT_MINIMAL_FIX
+                edit = self.BASE_SCORE + self.CORRECT_MINIMAL_FIX
             elif state.edit_correct:
-                edit = self.CORRECT_NONMINIMAL_FIX
+                edit = self.BASE_SCORE + self.CORRECT_NONMINIMAL_FIX
             else:
-                edit = self.PARTIAL_FIX
+                edit = self.BASE_SCORE + self.PARTIAL_FIX
             if state.tests_passed is False and state.tests_run:
                 edit += self.FIX_BROKE_TESTS
         breakdown["edit"] = round(edit, 3)
 
-        verify = 0.0
+        verify = self.BASE_SCORE
         if state.tests_run:
             verify += self.RAN_TESTS
             if state.tests_passed:
@@ -101,20 +101,18 @@ class RewardComputer:
             verify += self.SUBMIT_WITHOUT_VERIFY
         breakdown["verification"] = round(verify, 3)
 
-        eff = 0.0
+        eff = self.BASE_SCORE
         ratio = state.step_count / state.max_steps
         if state.done and state.edit_correct:
             if ratio <= 0.60:
-                eff = self.EFFICIENCY_HIGH
+                eff = self.BASE_SCORE + self.EFFICIENCY_HIGH
             elif ratio <= 0.80:
-                eff = self.EFFICIENCY_MED
+                eff = self.BASE_SCORE + self.EFFICIENCY_MED
         if state.step_count >= state.max_steps:
             eff += self.HIT_MAX_STEPS
         breakdown["efficiency"] = round(eff, 3)
 
         raw = round(sum(breakdown.values()), 3)
-        # Add base score to ensure total is always > 0
-        raw = round(raw + self.BASE_SCORE, 3)
         if state.bug_2_exists:
             raw = round(raw * 0.5, 3)
         breakdown["total"] = raw
@@ -124,20 +122,20 @@ class RewardComputer:
         breakdown = {}
 
         if not state.diagnosis_submitted:
-            breakdown["diagnosis"] = self.NO_DIAGNOSIS
+            breakdown["diagnosis"] = self.BASE_SCORE + self.NO_DIAGNOSIS
         elif state.diagnosis_correct:
-            breakdown["diagnosis"] = self.CORRECT_DIAGNOSIS_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAGNOSIS_LATE
+            breakdown["diagnosis"] = self.BASE_SCORE + (self.CORRECT_DIAGNOSIS_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAGNOSIS_LATE)
         elif state.diagnosis_partial:
-            breakdown["diagnosis"] = self.PARTIAL_DIAGNOSIS
+            breakdown["diagnosis"] = self.BASE_SCORE + self.PARTIAL_DIAGNOSIS
         else:
-            breakdown["diagnosis"] = self.WRONG_DIAGNOSIS
+            breakdown["diagnosis"] = self.BASE_SCORE + self.WRONG_DIAGNOSIS
 
         if state.edit_correct:
-            breakdown["edit"] = self.CORRECT_MINIMAL_FIX if state.edit_minimal else self.CORRECT_NONMINIMAL_FIX
+            breakdown["edit"] = self.BASE_SCORE + (self.CORRECT_MINIMAL_FIX if state.edit_minimal else self.CORRECT_NONMINIMAL_FIX)
         else:
-            breakdown["edit"] = self.PARTIAL_FIX
+            breakdown["edit"] = self.BASE_SCORE + self.PARTIAL_FIX
 
-        verify = 0.0
+        verify = self.BASE_SCORE
         if state.tests_run:
             verify += self.RAN_TESTS
             if state.tests_passed:
@@ -146,7 +144,7 @@ class RewardComputer:
             verify += self.SUBMIT_WITHOUT_VERIFY
         breakdown["verification"] = round(verify, 3)
 
-        raw = round(sum(breakdown.values()) + self.BASE_SCORE, 3)
+        raw = round(sum(breakdown.values()), 3)
         breakdown["total"] = round(raw * 0.5, 3)
         return breakdown
 
