@@ -158,7 +158,10 @@ class CodeNavEnvironment(Environment):
         self._files: Dict[str, str] = {}
         self._wrong_diagnosis_count: int = 0
 
-    def reset(self) -> CodeNavObservation:
+    def reset(self, seed=None, episode_id=None, **kwargs) -> CodeNavObservation:
+        task_id = kwargs.get("task_id", self._task_id)
+        if task_id in ("easy", "medium", "hard"):
+            self._task_id = task_id
         self._task = get_scenario(self._task_id, self._scenario_index)
         self._active_task = self._task
         self._files = dict(self._task["files"])
