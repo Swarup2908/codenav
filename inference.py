@@ -208,6 +208,20 @@ async def run_episode_async(client: OpenAI, task_id: str) -> dict:
                     messages.append({"role": "user", "content": "ERROR: Invalid JSON. Respond with ONLY a JSON object."})
                     log_step(steps_taken + 1, "parse_error", 0.001, False, "invalid_json")
                     if parse_errors >= MAX_PARSE_ERRORS:
+                        # Submit to get a real score instead of returning 0.001
+                        try:
+                            await ws.send(json.dumps({"type": "step", "data": {"action_type": "submit"}}))
+                            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
+                            data = resp.get("data", {})
+                            obs = data.get("observation", {})
+                            if obs.get("final_score") is not None:
+                                reward = float(obs["final_score"])
+                                final_score = reward
+                                success = final_score > 0
+                                rewards.append(reward)
+                                log_step(steps_taken + 1, "submit", reward, True, None)
+                        except Exception:
+                            pass
                         break
                     continue
 
