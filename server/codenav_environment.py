@@ -541,7 +541,8 @@ class CodeNavEnvironment(Environment):
 
 
         total = breakdown["total"]
-        self._state.cumulative_reward += total
+        safe_total=_clamp(total)
+        self._state.cumulative_reward += safe_total
 
         # Per RFC 004: update rubric score so forward() returns valid value
         self._rubric.set_score(total)
