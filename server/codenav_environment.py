@@ -191,7 +191,7 @@ class CodeNavEnvironment(Environment):
 
     def step(self, action: CodeNavAction) -> CodeNavObservation:
         if self._state is None:
-            raise RuntimeError("Call reset() before step()")
+            self.reset()
         if self._state.done:
             return self._make_obs(success=False, message="Episode is already done.")
 
