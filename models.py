@@ -227,7 +227,7 @@ class CodeNavObservation(Observation):
     # Terminal action
     final_score: Optional[float] = Field(
         default=None,
-        description="Final score from the grader after submit (0.0 to 1.0)"
+        description="Final score from the grader after submit (strictly between 0 to 1)"
     )
     score_breakdown: Optional[Dict[str, float]] = Field(
         default=None,
