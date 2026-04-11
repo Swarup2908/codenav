@@ -6,16 +6,6 @@
 
 """
 CodeNav Environment Implementation.
-
-An RL environment where an agent acts as a software developer dropped into
-an unfamiliar Python codebase. The agent must read, diagnose, act, verify,
-and submit — rewarded for the quality of the entire process, not just the
-final output.
-
-Three tasks of increasing difficulty:
-    easy   — single file, obvious bug, no cross-file dependencies
-    medium — two/three files, non-obvious bug, one dependency to reason about
-    hard   — multiple files, subtle bug, cascading dependencies
 """
 
 import ast
@@ -31,63 +21,44 @@ try:
 except ImportError:
     from models import CodeNavAction, CodeNavObservation, CodeNavState
 
-
-# ---------------------------------------------------------------------------
-# Scenario Pool Import
-# ---------------------------------------------------------------------------
-
 try:
     from ..scenarios import get_scenario, get_pool_size
 except ImportError:
     from scenarios import get_scenario, get_pool_size
-# ---------------------------------------------------------------------------
-# Reward Computer
-# ---------------------------------------------------------------------------
+
+
+def _clamp_score(score: float) -> float:
+    """Clamp score to strictly (0, 1) — validator requires score not be exactly 0.0 or 1.0."""
+    return max(0.001, min(0.999, round(score, 3)))
+
 
 class RewardComputer:
-    """Computes reward signals based on agent behavior tracked in state."""
-
-    # Reading intelligently
     RELEVANT_FILE_READ = 0.05
     IRRELEVANT_FILE_READ = -0.05
     EDIT_WITHOUT_READING = -0.15
-    BRUTE_FORCE_READ_PENALTY = -0.10   # read >70% of files
-
-    # Diagnosis quality
-    CORRECT_DIAGNOSIS_EARLY = 0.20     # before any edit
-    CORRECT_DIAGNOSIS_LATE = 0.10      # after some edits
+    BRUTE_FORCE_READ_PENALTY = -0.10
+    CORRECT_DIAGNOSIS_EARLY = 0.20
+    CORRECT_DIAGNOSIS_LATE = 0.10
     PARTIAL_DIAGNOSIS = 0.08
     NO_DIAGNOSIS = -0.10
     WRONG_DIAGNOSIS = -0.15
-    REPEATED_WRONG_DIAGNOSIS = -0.05   # per extra wrong attempt
-
-    # Edit quality
+    REPEATED_WRONG_DIAGNOSIS = -0.05
     CORRECT_MINIMAL_FIX = 0.30
     CORRECT_NONMINIMAL_FIX = 0.20
     PARTIAL_FIX = 0.10
     FIX_INTRODUCED_BUG = -0.10
     FIX_BROKE_TESTS = -0.15
-
-    # Verification quality
     RAN_TESTS = 0.05
     TESTS_PASSED = 0.10
     TRACED_EXECUTION = 0.05
     SUBMIT_WITHOUT_VERIFY = -0.10
-
-    # Efficiency
-    EFFICIENCY_HIGH = 0.10    # solved within 60% of max steps
-    EFFICIENCY_MED = 0.05     # solved within 80% of max steps
+    EFFICIENCY_HIGH = 0.10
+    EFFICIENCY_MED = 0.05
     HIT_MAX_STEPS = -0.10
 
     def compute_final_reward(self, state: CodeNavState, task: dict) -> Dict[str, float]:
-        """
-        Compute the full reward breakdown at episode end.
-
-        Returns a dict with per-dimension scores and total.
-        """
         breakdown = {}
 
-        # --- Reading ---
         read_score = 0.0
         for f in state.relevant_files_read:
             read_score += self.RELEVANT_FILE_READ
@@ -97,7 +68,6 @@ class RewardComputer:
             read_score += self.BRUTE_FORCE_READ_PENALTY
         breakdown["reading"] = round(read_score, 3)
 
-        # --- Diagnosis ---
         diag_score = 0.0
         if not state.diagnosis_submitted:
             diag_score = self.NO_DIAGNOSIS
@@ -112,7 +82,6 @@ class RewardComputer:
             diag_score = self.WRONG_DIAGNOSIS
         breakdown["diagnosis"] = round(diag_score, 3)
 
-        # --- Edit ---
         edit_score = 0.0
         if state.edit_correct is not None:
             if state.edit_correct and state.edit_minimal:
@@ -125,7 +94,6 @@ class RewardComputer:
                 edit_score += self.FIX_BROKE_TESTS
         breakdown["edit"] = round(edit_score, 3)
 
-        # --- Verification ---
         verify_score = 0.0
         if state.tests_run:
             verify_score += self.RAN_TESTS
@@ -135,7 +103,6 @@ class RewardComputer:
             verify_score += self.SUBMIT_WITHOUT_VERIFY
         breakdown["verification"] = round(verify_score, 3)
 
-        # --- Efficiency ---
         eff_score = 0.0
         ratio = state.step_count / state.max_steps
         if state.done and state.edit_correct:
@@ -149,24 +116,15 @@ class RewardComputer:
 
         raw_total = round(sum(breakdown.values()), 3)
 
-        # For two-bug episodes, scale bug_1 contribution to 50%
-        # Bug_2 reward will be added when bug_2 is submitted
         if state.bug_2_exists:
             raw_total = round(raw_total * 0.5, 3)
 
         breakdown["total"] = raw_total
         return breakdown
 
-
     def compute_bug_2_reward(self, state: "CodeNavState") -> "Dict[str, float]":
-        """
-        Compute reward for bug_2 performance.
-        Same dimensions as bug_1 but based on bug_2 state.
-        Contributes the other 50% of total episode reward.
-        """
         breakdown = {}
 
-        # Diagnosis for bug_2
         if not state.diagnosis_submitted:
             breakdown["diagnosis"] = self.NO_DIAGNOSIS
         elif state.diagnosis_correct:
@@ -180,7 +138,6 @@ class RewardComputer:
         else:
             breakdown["diagnosis"] = self.WRONG_DIAGNOSIS
 
-        # Edit for bug_2
         if state.edit_correct:
             breakdown["edit"] = (
                 self.CORRECT_MINIMAL_FIX
@@ -190,7 +147,6 @@ class RewardComputer:
         else:
             breakdown["edit"] = self.PARTIAL_FIX
 
-        # Verification for bug_2
         verify = 0.0
         if state.tests_run:
             verify += self.RAN_TESTS
@@ -200,41 +156,20 @@ class RewardComputer:
             verify += self.SUBMIT_WITHOUT_VERIFY
         breakdown["verification"] = round(verify, 3)
 
-        # Scale to 50% of total
         raw = round(sum(breakdown.values()), 3)
         breakdown["total"] = round(raw * 0.5, 3)
         return breakdown
 
 
-# ---------------------------------------------------------------------------
-# Main Environment
-# ---------------------------------------------------------------------------
-
 class CodeNavEnvironment(Environment):
-    """
-    CodeNav: Developer Workflow RL Environment.
-
-    Places an agent in the role of a Python developer dropped into an
-    unfamiliar synthetic codebase. Rewards quality of the entire reasoning
-    process — not just final output correctness.
-    """
-
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     def __init__(self, task_id: str = "easy", scenario_index: int = None):
-        """
-        Initialize CodeNav for a specific task.
-
-        Args:
-            task_id: one of 'easy', 'medium', 'hard'
-            scenario_index: specific scenario to use (None = random each reset)
-        """
         if task_id not in ("easy", "medium", "hard"):
             raise ValueError(f"task_id must be one of ['easy', 'medium', 'hard']")
 
         self._task_id = task_id
         self._scenario_index = scenario_index
-        # Load initial scenario — will be refreshed on each reset() call
         self._task = get_scenario(task_id, scenario_index)
         self._active_task = self._task
         self._reward_computer = RewardComputer()
@@ -242,16 +177,9 @@ class CodeNavEnvironment(Environment):
         self._files: Dict[str, str] = {}
         self._wrong_diagnosis_count: int = 0
 
-    # -----------------------------------------------------------------------
-    # OpenEnv Interface
-    # -----------------------------------------------------------------------
-
     def reset(self) -> CodeNavObservation:
-        """Reset the environment and return the initial observation."""
-        # Pick a fresh scenario each episode (random unless index is pinned)
         self._task = get_scenario(self._task_id, self._scenario_index)
         self._active_task = self._task
-
         self._files = dict(self._task["files"])
         self._wrong_diagnosis_count = 0
 
@@ -282,8 +210,7 @@ class CodeNavEnvironment(Environment):
             reward=0.0,
         )
 
-    def step(self, action: CodeNavAction) -> CodeNavObservation:  # type: ignore[override]
-        """Execute one action and return the resulting observation."""
+    def step(self, action: CodeNavAction) -> CodeNavObservation:
         if self._state is None:
             raise RuntimeError("Call reset() before step()")
 
@@ -295,7 +222,6 @@ class CodeNavEnvironment(Environment):
 
         self._state.step_count += 1
 
-        # Route to the correct handler
         handlers = {
             "read_file": self._handle_read_file,
             "read_function": self._handle_read_function,
@@ -319,7 +245,6 @@ class CodeNavEnvironment(Environment):
 
         obs = handler(action)
 
-        # Check step limit
         if self._state.step_count >= self._state.max_steps and not self._state.done:
             self._state.done = True
             obs.message += "\n[MAX STEPS REACHED — episode ending]"
@@ -329,14 +254,9 @@ class CodeNavEnvironment(Environment):
 
     @property
     def state(self) -> CodeNavState:
-        """Return current episode state."""
         if self._state is None:
             raise RuntimeError("Call reset() before accessing state")
         return self._state
-
-    # -----------------------------------------------------------------------
-    # Action Handlers
-    # -----------------------------------------------------------------------
 
     def _handle_read_file(self, action: CodeNavAction) -> CodeNavObservation:
         fname = action.filename
@@ -349,7 +269,6 @@ class CodeNavEnvironment(Environment):
         content = self._files[fname]
         line_count = len(content.splitlines())
 
-        # Track reading
         if fname not in self._state.files_read:
             self._state.files_read.append(fname)
             if fname in self._task["relevant_files"]:
@@ -357,7 +276,6 @@ class CodeNavEnvironment(Environment):
             else:
                 self._state.irrelevant_files_read.append(fname)
 
-        # Brute force check
         total = len(self._files)
         if len(self._state.files_read) / total > 0.70:
             self._state.read_more_than_threshold = True
@@ -374,15 +292,9 @@ class CodeNavEnvironment(Environment):
         func_name = action.function_name
 
         if not fname or fname not in self._files:
-            return self._make_obs(
-                success=False,
-                message=f"File '{fname}' not found.",
-            )
+            return self._make_obs(success=False, message=f"File '{fname}' not found.")
         if not func_name:
-            return self._make_obs(
-                success=False,
-                message="function_name is required for read_function action.",
-            )
+            return self._make_obs(success=False, message="function_name is required.")
 
         content = self._files[fname]
         extracted = self._extract_function(content, func_name)
@@ -393,7 +305,6 @@ class CodeNavEnvironment(Environment):
                 message=f"Function '{func_name}' not found in '{fname}'.",
             )
 
-        # Count as reading the file
         if fname not in self._state.files_read:
             self._state.files_read.append(fname)
             if fname in self._task["relevant_files"]:
@@ -411,20 +322,13 @@ class CodeNavEnvironment(Environment):
     def _handle_search_codebase(self, action: CodeNavAction) -> CodeNavObservation:
         query = action.query
         if not query:
-            return self._make_obs(
-                success=False,
-                message="query is required for search_codebase action.",
-            )
+            return self._make_obs(success=False, message="query is required.")
 
         results = []
         for fname, content in self._files.items():
             for i, line in enumerate(content.splitlines(), 1):
                 if query.lower() in line.lower():
-                    results.append({
-                        "file": fname,
-                        "line": i,
-                        "content": line.strip(),
-                    })
+                    results.append({"file": fname, "line": i, "content": line.strip()})
 
         return self._make_obs(
             success=True,
@@ -435,10 +339,7 @@ class CodeNavEnvironment(Environment):
     def _handle_submit_diagnosis(self, action: CodeNavAction) -> CodeNavObservation:
         diagnosis = action.diagnosis
         if not diagnosis:
-            return self._make_obs(
-                success=False,
-                message="diagnosis is required for submit_diagnosis action.",
-            )
+            return self._make_obs(success=False, message="diagnosis is required.")
 
         keywords = self._active_task["correct_diagnosis_keywords"]
         diagnosis_lower = diagnosis.lower()
@@ -468,7 +369,7 @@ class CodeNavEnvironment(Environment):
 
         return self._make_obs(
             success=True,
-            message=f"Diagnosis submitted.",
+            message="Diagnosis submitted.",
             diagnosis_feedback=feedback,
         )
 
@@ -484,18 +385,11 @@ class CodeNavEnvironment(Environment):
 
         if fname == correct_file and line_start is not None and line_end is not None:
             overlap = not (line_end < correct_start or line_start > correct_end)
-            if overlap:
-                feedback = "Location identified correctly — the bug is in this region."
-            else:
-                feedback = "Wrong line range in the right file. Look more carefully."
+            feedback = "Location identified correctly." if overlap else "Wrong line range."
         else:
             feedback = f"Wrong file. The bug is not in '{fname}'."
 
-        return self._make_obs(
-            success=True,
-            message="Location submitted.",
-            diagnosis_feedback=feedback,
-        )
+        return self._make_obs(success=True, message="Location submitted.", diagnosis_feedback=feedback)
 
     def _handle_edit_code(self, action: CodeNavAction) -> CodeNavObservation:
         fname = action.filename
@@ -503,17 +397,10 @@ class CodeNavEnvironment(Environment):
         new_code = action.new_code
 
         if not fname or fname not in self._files:
-            return self._make_obs(
-                success=False,
-                message=f"File '{fname}' not found.",
-            )
+            return self._make_obs(success=False, message=f"File '{fname}' not found.")
         if old_code is None or new_code is None:
-            return self._make_obs(
-                success=False,
-                message="old_code and new_code are required for edit_code.",
-            )
+            return self._make_obs(success=False, message="old_code and new_code are required.")
 
-        # Penalty if agent edits without reading
         step_penalty = 0.0
         if fname not in self._state.files_read:
             step_penalty = RewardComputer.EDIT_WITHOUT_READING
@@ -528,57 +415,42 @@ class CodeNavEnvironment(Environment):
 
         new_content = content.replace(old_code, new_code, 1)
         diff = "\n".join(difflib.unified_diff(
-            content.splitlines(),
-            new_content.splitlines(),
-            fromfile=f"a/{fname}",
-            tofile=f"b/{fname}",
-            lineterm="",
+            content.splitlines(), new_content.splitlines(),
+            fromfile=f"a/{fname}", tofile=f"b/{fname}", lineterm="",
         ))
 
-        # Syntax check
         syntax_valid = self._check_syntax(new_content)
         if not syntax_valid:
             return self._make_obs(
                 success=False,
-                message="Edit rejected — result is not valid Python. Check your syntax.",
-                diff=diff,
-                syntax_valid=False,
+                message="Edit rejected — result is not valid Python.",
+                diff=diff, syntax_valid=False,
             )
 
         self._files[fname] = new_content
         self._state.edits_made += 1
 
-        # Check edit correctness by silently running tests.
-        # Most honest signal — did the fix actually work?
-        # We do NOT update state.tests_run or state.tests_passed here —
-        # those only change when the agent explicitly calls run_tests.
         silent_result = self._silent_test_run()
         self._state.edit_correct = silent_result
 
         if self._state.edit_correct:
-            # Minimal = agent changed 5 or fewer lines
             lines_changed = max(
                 len(old_code.strip().splitlines()),
                 len(new_code.strip().splitlines())
             )
             self._state.edit_minimal = lines_changed <= 5
 
-        # Scope warning
         scope_warning = None
-        irrelevant = self._task.get("irrelevant_files", [])
-        if fname in irrelevant:
-            scope_warning = f"Warning: '{fname}' is outside the expected scope of this fix."
+        if fname in self._task.get("irrelevant_files", []):
+            scope_warning = f"Warning: '{fname}' is outside the expected scope."
 
         msg = f"Edit applied to '{fname}'."
         if step_penalty < 0:
-            msg += f" Warning: you edited a file you hadn't read first ({step_penalty} reward penalty)."
+            msg += f" Warning: edited without reading first ({step_penalty} penalty)."
 
         return self._make_obs(
-            success=True,
-            message=msg,
-            diff=diff,
-            syntax_valid=True,
-            scope_warning=scope_warning,
+            success=True, message=msg,
+            diff=diff, syntax_valid=True, scope_warning=scope_warning,
         )
 
     def _handle_add_code(self, action: CodeNavAction) -> CodeNavObservation:
@@ -589,29 +461,21 @@ class CodeNavEnvironment(Environment):
         if not fname or fname not in self._files:
             return self._make_obs(success=False, message=f"File '{fname}' not found.")
         if not new_code:
-            return self._make_obs(success=False, message="new_code is required for add_code.")
+            return self._make_obs(success=False, message="new_code is required.")
 
         content = self._files[fname]
-
         if location == "top":
             new_content = new_code + "\n" + content
         elif location.startswith("after:"):
             func_name = location.split("after:", 1)[1]
             new_content = self._insert_after_function(content, func_name, new_code)
             if new_content is None:
-                return self._make_obs(
-                    success=False,
-                    message=f"Function '{func_name}' not found for after: insertion.",
-                )
+                return self._make_obs(success=False, message=f"Function '{func_name}' not found.")
         else:
             new_content = content + "\n" + new_code
 
         if not self._check_syntax(new_content):
-            return self._make_obs(
-                success=False,
-                message="Add rejected — result is not valid Python.",
-                syntax_valid=False,
-            )
+            return self._make_obs(success=False, message="Add rejected — not valid Python.", syntax_valid=False)
 
         diff = "\n".join(difflib.unified_diff(
             content.splitlines(), new_content.splitlines(),
@@ -620,12 +484,7 @@ class CodeNavEnvironment(Environment):
         self._files[fname] = new_content
         self._state.edits_made += 1
 
-        return self._make_obs(
-            success=True,
-            message=f"Code added to '{fname}' at location '{location}'.",
-            diff=diff,
-            syntax_valid=True,
-        )
+        return self._make_obs(success=True, message=f"Code added to '{fname}'.", diff=diff, syntax_valid=True)
 
     def _handle_delete_code(self, action: CodeNavAction) -> CodeNavObservation:
         fname = action.filename
@@ -634,22 +493,15 @@ class CodeNavEnvironment(Environment):
         if not fname or fname not in self._files:
             return self._make_obs(success=False, message=f"File '{fname}' not found.")
         if not target_code:
-            return self._make_obs(success=False, message="target_code is required for delete_code.")
+            return self._make_obs(success=False, message="target_code is required.")
 
         content = self._files[fname]
         if target_code not in content:
-            return self._make_obs(
-                success=False,
-                message="target_code not found in file. Check exact whitespace.",
-            )
+            return self._make_obs(success=False, message="target_code not found in file.")
 
         new_content = content.replace(target_code, "", 1)
         if not self._check_syntax(new_content):
-            return self._make_obs(
-                success=False,
-                message="Delete rejected — result is not valid Python.",
-                syntax_valid=False,
-            )
+            return self._make_obs(success=False, message="Delete rejected — not valid Python.", syntax_valid=False)
 
         diff = "\n".join(difflib.unified_diff(
             content.splitlines(), new_content.splitlines(),
@@ -658,18 +510,12 @@ class CodeNavEnvironment(Environment):
         self._files[fname] = new_content
         self._state.edits_made += 1
 
-        return self._make_obs(
-            success=True,
-            message=f"Code deleted from '{fname}'.",
-            diff=diff,
-            syntax_valid=True,
-        )
+        return self._make_obs(success=True, message=f"Code deleted from '{fname}'.", diff=diff, syntax_valid=True)
 
     def _handle_run_tests(self, action: CodeNavAction) -> CodeNavObservation:
         self._state.tests_run = True
         self._state.verified_before_submit = True
 
-        # Run all test files in the current file set
         test_files = {k: v for k, v in self._files.items() if k.startswith("test_")}
         all_results = {}
         overall_passed = True
@@ -692,7 +538,6 @@ class CodeNavEnvironment(Environment):
             "total_failed": total_fail,
         }
 
-        # Check if bug_1 just got fixed and bug_2 exists
         bug_2_def = self._task.get("bug_2")
         if (
             overall_passed
@@ -706,12 +551,10 @@ class CodeNavEnvironment(Environment):
             self._state.diagnosis_submitted = False
             self._wrong_diagnosis_count = 0
 
-            # Inject additional test cases for bug_2 into the files
             for fname, extra_tests in bug_2_def.get("test_additions", {}).items():
                 if fname in self._files:
                     self._files[fname] += extra_tests
 
-            # Switch active task config to bug_2
             self._active_task = {
                 **self._task,
                 "relevant_files": bug_2_def["relevant_files"],
@@ -719,7 +562,6 @@ class CodeNavEnvironment(Environment):
                 "correct_fix": bug_2_def["correct_fix"],
             }
 
-            # Reset per-bug tracking fields for bug_2
             self._state.diagnosis_correct = None
             self._state.diagnosis_partial = None
             self._state.diagnosis_before_edit = False
@@ -743,12 +585,7 @@ class CodeNavEnvironment(Environment):
                 test_results=test_result_payload,
             )
 
-        # Check if bug_2 just got fixed
-        if (
-            overall_passed
-            and self._state.current_bug == 2
-            and not self._state.bug_2_fixed
-        ):
+        if overall_passed and self._state.current_bug == 2 and not self._state.bug_2_fixed:
             self._state.bug_2_fixed = True
 
         return self._make_obs(
@@ -762,14 +599,10 @@ class CodeNavEnvironment(Environment):
         input_args = action.input_args or {}
 
         if not func_name:
-            return self._make_obs(
-                success=False,
-                message="function_name is required for trace_execution.",
-            )
+            return self._make_obs(success=False, message="function_name is required.")
 
         self._state.verified_before_submit = True
 
-        # Find the file containing this function
         target_file = None
         for fname, content in self._files.items():
             if f"def {func_name}" in content:
@@ -777,10 +610,7 @@ class CodeNavEnvironment(Environment):
                 break
 
         if target_file is None:
-            return self._make_obs(
-                success=False,
-                message=f"Function '{func_name}' not found in any file.",
-            )
+            return self._make_obs(success=False, message=f"Function '{func_name}' not found.")
 
         fname, content = target_file
         result = self._safe_execute_function(content, func_name, input_args)
@@ -795,34 +625,20 @@ class CodeNavEnvironment(Environment):
         if self._state is None:
             raise RuntimeError("Call reset() first.")
 
-        # If bug_2 exists and not yet fixed, warn agent before ending
-        if (
-            self._state.bug_2_exists
-            and self._state.bug_1_fixed
-            and not self._state.bug_2_fixed
-            and self._state.current_bug == 2
-        ):
-            # Allow submit but penalize — bug_2 was not fixed
-            pass
-
         self._state.done = True
 
-        # Final reward computation
         breakdown = self._reward_computer.compute_final_reward(self._state, self._task)
 
-        # For two-bug episodes, add bug_2 contribution
         if self._state.bug_2_exists:
             bug_2_breakdown = self._reward_computer.compute_bug_2_reward(self._state)
             breakdown["bug_2_total"] = bug_2_breakdown["total"]
             breakdown["total"] = round(
                 breakdown["total"] + bug_2_breakdown["total"], 3
             )
-            breakdown.update({f"bug2_{k}": v for k, v in bug_2_breakdown.items()
-                               if k != "total"})
+            breakdown.update({f"bug2_{k}": v for k, v in bug_2_breakdown.items() if k != "total"})
 
-        total = breakdown["total"]
         # Clamp to strictly (0, 1) — validator requires score not be exactly 0.0 or 1.0
-        total = max(0.001, min(0.999, total))
+        total = _clamp_score(breakdown["total"])
         breakdown["total"] = total
         self._state.cumulative_reward += total
 
@@ -835,27 +651,16 @@ class CodeNavEnvironment(Environment):
             reward=total,
         )
 
-    # -----------------------------------------------------------------------
-    # Helpers
-    # -----------------------------------------------------------------------
-
     def _make_obs(self, success: bool, message: str, **kwargs) -> CodeNavObservation:
-        """Build a CodeNavObservation with the current persistent state."""
         if self._state is None:
-            step = 0
-            max_s = 0
-            files = []
-            read = []
-            edits = 0
-            diag = False
-            tests = False
+            step, max_s, files, read, edits, diag, tests = 0, 0, [], [], 0, False, False
         else:
-            step = self._state.step_count
+            step  = self._state.step_count
             max_s = self._state.max_steps
             files = list(self._files.keys())
-            read = list(self._state.files_read)
+            read  = list(self._state.files_read)
             edits = self._state.edits_made
-            diag = self._state.diagnosis_submitted
+            diag  = self._state.diagnosis_submitted
             tests = self._state.tests_run
 
         return CodeNavObservation(
@@ -874,7 +679,6 @@ class CodeNavEnvironment(Environment):
         )
 
     def _extract_function(self, source: str, func_name: str) -> Optional[str]:
-        """Extract a single function's source from a Python file."""
         try:
             tree = ast.parse(source)
         except SyntaxError:
@@ -883,13 +687,10 @@ class CodeNavEnvironment(Environment):
         lines = source.splitlines()
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == func_name:
-                start = node.lineno - 1
-                end = node.end_lineno
-                return "\n".join(lines[start:end])
+                return "\n".join(lines[node.lineno - 1:node.end_lineno])
         return None
 
     def _insert_after_function(self, source: str, func_name: str, new_code: str) -> Optional[str]:
-        """Insert code after a named function."""
         try:
             tree = ast.parse(source)
         except SyntaxError:
@@ -898,39 +699,24 @@ class CodeNavEnvironment(Environment):
         lines = source.splitlines()
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == func_name:
-                insert_at = node.end_lineno
-                lines.insert(insert_at, new_code)
+                lines.insert(node.end_lineno, new_code)
                 return "\n".join(lines)
         return None
 
     def _check_syntax(self, source: str) -> bool:
-        """Return True if source is valid Python."""
         try:
             ast.parse(source)
             return True
         except SyntaxError:
             return False
 
-    def _build_module_registry(self) -> "Dict[str, Any]":
-        """
-        Build an in-memory module registry from all current non-test files.
-
-        Two-pass exec strategy:
-        - Pass 1: register all modules as empty shells in sys.modules,
-          then exec all files. Files with no cross-imports succeed.
-        - Pass 2: re-exec files that failed in pass 1. By now their
-          dependencies are populated, so cross-imports resolve.
-
-        This handles one level of dependency depth which covers all
-        three of our tasks.
-        """
+    def _build_module_registry(self):
         import sys
         import types
 
-        module_objects: "Dict[str, Any]" = {}
-        original_modules: "Dict[str, Any]" = {}
+        module_objects = {}
+        original_modules = {}
 
-        # Register all modules as empty shells first
         for f in self._files:
             if not f.startswith("test_"):
                 name = f.replace(".py", "")
@@ -940,34 +726,25 @@ class CodeNavEnvironment(Environment):
                 original_modules[name] = sys.modules.get(name)
                 sys.modules[name] = mod
 
-        # Multi-pass exec — retry failed files until nothing new resolves.
-        # Each pass may unblock files that depend on what just succeeded.
-        # Max passes = number of files (handles arbitrary depth chains).
-        pending: "Dict[str, str]" = {
-            f: src for f, src in self._files.items()
-            if not f.startswith("test_")
-        }
+        pending = {f: src for f, src in self._files.items() if not f.startswith("test_")}
 
-        max_passes = len(pending) + 1
-        for _ in range(max_passes):
+        for _ in range(len(pending) + 1):
             if not pending:
                 break
-            still_failing: "Dict[str, str]" = {}
+            still_failing = {}
             for f, src in pending.items():
                 name = f.replace(".py", "")
                 try:
                     exec(compile(src, f, "exec"), module_objects[name].__dict__)
                 except Exception:
                     still_failing[f] = src
-            # If nothing improved this pass, stop — circular dep or real error
             if len(still_failing) == len(pending):
                 break
             pending = still_failing
 
         return module_objects, original_modules
 
-    def _restore_modules(self, original_modules: "Dict[str, Any]") -> None:
-        """Restore sys.modules to state before _build_module_registry."""
+    def _restore_modules(self, original_modules) -> None:
         import sys
         for name, original in original_modules.items():
             if original is None:
@@ -976,10 +753,6 @@ class CodeNavEnvironment(Environment):
                 sys.modules[name] = original
 
     def _run_test_file(self, fname: str, content: str) -> Dict[str, Any]:
-        """
-        Run all test_ functions in a test file string.
-        Returns a dict with passed/failed counts and per-test results.
-        """
         module_objects, original_modules = self._build_module_registry()
 
         namespace: Dict[str, Any] = {}
@@ -991,8 +764,7 @@ class CodeNavEnvironment(Environment):
         finally:
             self._restore_modules(original_modules)
 
-        test_funcs = {k: v for k, v in namespace.items()
-                      if k.startswith("test_") and callable(v)}
+        test_funcs = {k: v for k, v in namespace.items() if k.startswith("test_") and callable(v)}
 
         results = {}
         passed = 0
@@ -1010,21 +782,10 @@ class CodeNavEnvironment(Environment):
                 results[name] = {"status": "ERROR", "error": str(e)}
                 failed += 1
 
-        return {
-            "tests": results,
-            "passed": passed,
-            "failed": failed,
-            "all_passed": failed == 0,
-        }
+        return {"tests": results, "passed": passed, "failed": failed, "all_passed": failed == 0}
 
     def _silent_test_run(self) -> bool:
-        """
-        Silently run all tests against current file state.
-        Returns True if all tests pass, False otherwise.
-        Does NOT update agent-visible state.
-        """
-        test_files = {k: v for k, v in self._files.items()
-                      if k.startswith("test_")}
+        test_files = {k: v for k, v in self._files.items() if k.startswith("test_")}
         if not test_files:
             return False
 
@@ -1034,13 +795,9 @@ class CodeNavEnvironment(Environment):
                 return False
         return True
 
-    def _safe_execute_function(
-        self, source: str, func_name: str, input_args: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Safely execute a function with given arguments and return the trace."""
+    def _safe_execute_function(self, source: str, func_name: str, input_args: Dict[str, Any]) -> Dict[str, Any]:
         namespace: Dict[str, Any] = {}
 
-        # Load all current files into namespace
         for f, src in self._files.items():
             try:
                 exec(compile(src, f, "exec"), namespace)
@@ -1055,4 +812,4 @@ class CodeNavEnvironment(Environment):
             result = func(**input_args)
             return {"return_value": result, "exception": None}
         except Exception as e:
-            return {"return_value": None, "exception": f"{type(e).__name__}: {e}"}  
+            return {"return_value": None, "exception": f"{type(e).__name__}: {e}"}
