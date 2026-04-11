@@ -164,7 +164,7 @@ def parse(text: str) -> Optional[dict]:
 
 def run_episode(client: OpenAI, task_id: str) -> dict:
     rewards: List[float] = []
-    final_score = 0.0
+    final_score = 0.001
     steps_taken = 0
     success = False
     parse_errors = 0
@@ -195,7 +195,7 @@ def run_episode(client: OpenAI, task_id: str) -> dict:
             parse_errors += 1
             messages.append({"role": "assistant", "content": response_text})
             messages.append({"role": "user", "content": "ERROR: Invalid JSON. Respond with ONLY a JSON object."})
-            log_step(steps_taken + 1, "parse_error", 0.0, False, "invalid_json")
+            log_step(steps_taken + 1, "parse_error", 0.001, False, "invalid_json")
             if parse_errors >= MAX_PARSE_ERRORS:
                 break
             continue
@@ -208,11 +208,11 @@ def run_episode(client: OpenAI, task_id: str) -> dict:
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            log_step(steps_taken, action_dict.get("action_type", "unknown"), 0.0, True, str(e)[:80])
+            log_step(steps_taken, action_dict.get("action_type", "unknown"), 0.001, True, str(e)[:80])
             break
 
         obs = data.get("observation", {})
-        reward = float(data.get("reward", 0.0))
+        reward = max(0.001, float(data.get("reward", 0.001)))
         done = bool(data.get("done", False))
 
         if obs.get("final_score") is not None:
@@ -240,7 +240,7 @@ def run_episode(client: OpenAI, task_id: str) -> dict:
 
         max_steps = obs.get("max_steps", max_steps)
         if steps_taken >= max_steps:
-            log_step(steps_taken + 1, "timeout", 0.0, True, "max_steps_reached")
+            log_step(steps_taken + 1, "timeout", 0.001, True, "max_steps_reached")
             break
 
     return {"final_score": final_score, "steps_taken": steps_taken, "rewards": rewards, "success": success}
@@ -260,7 +260,8 @@ def main() -> None:
     for task_id in ["easy", "medium", "hard"]:
         log_start(task=task_id, env=BENCHMARK, model=MODEL_NAME)
         result = run_episode(client=client, task_id=task_id)
-        log_end(success=result["success"], steps=result["steps_taken"], rewards=result["rewards"])
+        clamped_rewards = [max(0.001, min(0.999, r)) for r in result["rewards"]] if result["rewards"] else [0.001]
+        log_end(success=result["success"], steps=result["steps_taken"], rewards=clamped_rewards)
 
 
 if __name__ == "__main__":
