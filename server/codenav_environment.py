@@ -821,6 +821,9 @@ class CodeNavEnvironment(Environment):
                                if k != "total"})
 
         total = breakdown["total"]
+        # Clamp to strictly (0, 1) — validator requires score not be exactly 0.0 or 1.0
+        total = max(0.001, min(0.999, total))
+        breakdown["total"] = total
         self._state.cumulative_reward += total
 
         return self._make_obs(
@@ -1052,4 +1055,4 @@ class CodeNavEnvironment(Environment):
             result = func(**input_args)
             return {"return_value": result, "exception": None}
         except Exception as e:
-            return {"return_value": None, "exception": f"{type(e).__name__}: {e}"}
+            return {"return_value": None, "exception": f"{type(e).__name__}: {e}"}  
