@@ -28,16 +28,19 @@ tasks:
     description: "Single file, obvious bug, no cross-file dependencies"
     difficulty: easy
     max_steps: 20
+    score_range: [0.001, 0.999]
 
   - id: medium
     description: "Two files, non-obvious bug, one cross-file dependency"
     difficulty: medium
     max_steps: 30
+    score_range: [0.001, 0.999]
 
   - id: hard
     description: "Four files, subtle silent bug, cascading dependencies"
     difficulty: hard
     max_steps: 40
+    score_range: [0.001, 0.999]
 
 action_space:
   type: CodeNavAction
