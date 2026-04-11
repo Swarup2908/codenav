@@ -5,7 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-CodeNav Environment Implementation.
+CodeNav Environment — strictly following OpenEnv API spec.
+
+Per OpenEnv docs (deepwiki.com/meta-pytorch/OpenEnv):
+- Environment subclasses abstract base from openenv.core.env_server.interfaces
+- Observation base class has reward field (types.py:86-88)
+- State requires episode_id and step_count (types.py:190-197)
+- Rubric.forward(action, observation) -> float, strictly between 0 and 1
+- super().__init__(rubric=...) called first in __init__
+- SUPPORTS_CONCURRENT_SESSIONS = True for multi-session WebSocket support
 """
 
 import ast
@@ -14,11 +22,12 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
+
+# --- Rubric (RFC 004) ---
 try:
     from openenv.core.rubrics.base import Rubric
 except ImportError:
     class Rubric:
-        """Fallback Rubric base class if openenv-core version doesn't have it."""
         def forward(self, action, observation) -> float:
             return 0.5
         def __call__(self, action, observation) -> float:
@@ -26,21 +35,23 @@ except ImportError:
 
 
 class CodeNavRubric(Rubric):
-    """Official OpenEnv Rubric for CodeNav — scores strictly between 0 and 1."""
-    
-    def __init__(self):
-        self._last_score = 0.5
-    
-    def forward(self, action, observation) -> float:
-        """Return the last computed score, strictly between 0 and 1."""
-        score = self._last_score
-        # Ensure strictly between 0 and 1
-        score = max(0.11, min(0.89, float(score)))
-        return round(score, 3)
-    
-    def set_score(self, score: float) -> None:
-        self._last_score = max(0.11, min(0.89, float(score)))
+    """
+    Per RFC 004: Rubric.forward(action, observation) -> float in (0, 1).
+    Attached to Environment via super().__init__(rubric=self.rubric).
+    Updated on every submit action with the computed final score.
+    """
 
+    def __init__(self):
+        self._score = 0.5
+
+    def forward(self, action, observation) -> float:
+        return round(max(0.12, min(0.88, float(self._score))), 3)
+
+    def set_score(self, score: float) -> None:
+        self._score = max(0.12, min(0.88, float(score)))
+
+
+# --- Models ---
 try:
     from ..models import CodeNavAction, CodeNavObservation, CodeNavState
 except ImportError:
@@ -52,156 +63,169 @@ except ImportError:
     from scenarios import get_scenario, get_pool_size
 
 
-def _clamp(score: float) -> float:
-    """Clamp score to strictly (0, 1) — never exactly 0.0 or 1.0."""
-    return round(max(0.11, min(0.89, float(score))), 3)
+def _clamp(v: float) -> float:
+    """Clamp to strictly (0, 1) with safe buffer."""
+    return round(max(0.12, min(0.88, float(v))), 3)
 
+
+# --- Reward Computer ---
 
 class RewardComputer:
-    # Base score — every agent starts here, guarantees score > 0
-    BASE_SCORE = 0.15
+    BASE = 0.15
 
-    # Positive rewards
-    RELEVANT_FILE_READ = 0.03
-    CORRECT_DIAGNOSIS_EARLY = 0.15
-    CORRECT_DIAGNOSIS_LATE = 0.08
-    PARTIAL_DIAGNOSIS = 0.05
-    NO_DIAGNOSIS = 0.0
-    CORRECT_MINIMAL_FIX = 0.25
-    CORRECT_NONMINIMAL_FIX = 0.18
-    PARTIAL_FIX = 0.08
-    RAN_TESTS = 0.04
-    TESTS_PASSED = 0.08
-    EFFICIENCY_HIGH = 0.08
-    EFFICIENCY_MED = 0.04
+    RELEVANT_FILE_READ      =  0.03
+    IRRELEVANT_FILE_READ    = -0.02
+    BRUTE_FORCE_PENALTY     = -0.05
+    CORRECT_DIAG_EARLY      =  0.15
+    CORRECT_DIAG_LATE       =  0.08
+    PARTIAL_DIAG            =  0.05
+    NO_DIAG                 =  0.0
+    WRONG_DIAG              = -0.05
+    EDIT_WITHOUT_READ       = -0.05
+    CORRECT_MINIMAL_FIX     =  0.25
+    CORRECT_NONMINIMAL_FIX  =  0.18
+    PARTIAL_FIX             =  0.08
+    FIX_BROKE_TESTS         = -0.08
+    RAN_TESTS               =  0.04
+    TESTS_PASSED            =  0.08
+    SUBMIT_WITHOUT_VERIFY   = -0.03
+    EFFICIENCY_HIGH         =  0.08
+    EFFICIENCY_MED          =  0.04
+    HIT_MAX_STEPS           = -0.05
 
-    # Small penalties (capped so score never goes below 0.1 after clamping)
-    IRRELEVANT_FILE_READ = -0.02
-    EDIT_WITHOUT_READING = -0.05
-    BRUTE_FORCE_READ_PENALTY = -0.05
-    WRONG_DIAGNOSIS = -0.05
-    FIX_BROKE_TESTS = -0.08
-    SUBMIT_WITHOUT_VERIFY = -0.03
-    HIT_MAX_STEPS = -0.05
+    def compute(self, state, task):
+        b = {}
 
-    def compute_final_reward(self, state, task):
-        breakdown = {}
+        # Reading
+        r = self.BASE
+        for _ in state.relevant_files_read:   r += self.RELEVANT_FILE_READ
+        for _ in state.irrelevant_files_read: r += self.IRRELEVANT_FILE_READ
+        if state.read_more_than_threshold:    r += self.BRUTE_FORCE_PENALTY
+        b["reading"] = round(r, 3)
 
-        read_score = self.BASE_SCORE
-        for f in state.relevant_files_read:
-            read_score += self.RELEVANT_FILE_READ
-        for f in state.irrelevant_files_read:
-            read_score += self.IRRELEVANT_FILE_READ
-        if state.read_more_than_threshold:
-            read_score += self.BRUTE_FORCE_READ_PENALTY
-        breakdown["reading"] = round(read_score, 3)
-
+        # Diagnosis
         if not state.diagnosis_submitted:
-            diag = self.BASE_SCORE + self.NO_DIAGNOSIS
+            d = self.BASE + self.NO_DIAG
         elif state.diagnosis_correct:
-            diag = self.BASE_SCORE + (self.CORRECT_DIAGNOSIS_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAGNOSIS_LATE)
+            d = self.BASE + (self.CORRECT_DIAG_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAG_LATE)
         elif state.diagnosis_partial:
-            diag = self.BASE_SCORE + self.PARTIAL_DIAGNOSIS
+            d = self.BASE + self.PARTIAL_DIAG
         else:
-            diag = self.BASE_SCORE + self.WRONG_DIAGNOSIS
-        breakdown["diagnosis"] = round(diag, 3)
+            d = self.BASE + self.WRONG_DIAG
+        b["diagnosis"] = round(d, 3)
 
-        edit = self.BASE_SCORE
+        # Edit
+        e = self.BASE
         if state.edit_correct is not None:
             if state.edit_correct and state.edit_minimal:
-                edit = self.BASE_SCORE + self.CORRECT_MINIMAL_FIX
+                e = self.BASE + self.CORRECT_MINIMAL_FIX
             elif state.edit_correct:
-                edit = self.BASE_SCORE + self.CORRECT_NONMINIMAL_FIX
+                e = self.BASE + self.CORRECT_NONMINIMAL_FIX
             else:
-                edit = self.BASE_SCORE + self.PARTIAL_FIX
+                e = self.BASE + self.PARTIAL_FIX
             if state.tests_passed is False and state.tests_run:
-                edit += self.FIX_BROKE_TESTS
-        breakdown["edit"] = round(edit, 3)
+                e += self.FIX_BROKE_TESTS
+        b["edit"] = round(e, 3)
 
-        verify = self.BASE_SCORE
+        # Verification
+        v = self.BASE
         if state.tests_run:
-            verify += self.RAN_TESTS
+            v += self.RAN_TESTS
             if state.tests_passed:
-                verify += self.TESTS_PASSED
+                v += self.TESTS_PASSED
         if not state.verified_before_submit:
-            verify += self.SUBMIT_WITHOUT_VERIFY
-        breakdown["verification"] = round(verify, 3)
+            v += self.SUBMIT_WITHOUT_VERIFY
+        b["verification"] = round(v, 3)
 
-        eff = self.BASE_SCORE
-        ratio = state.step_count / state.max_steps
+        # Efficiency
+        eff = self.BASE
+        ratio = state.step_count / state.max_steps if state.max_steps else 1.0
         if state.done and state.edit_correct:
-            if ratio <= 0.60:
-                eff = self.BASE_SCORE + self.EFFICIENCY_HIGH
-            elif ratio <= 0.80:
-                eff = self.BASE_SCORE + self.EFFICIENCY_MED
+            if ratio <= 0.60:   eff = self.BASE + self.EFFICIENCY_HIGH
+            elif ratio <= 0.80: eff = self.BASE + self.EFFICIENCY_MED
         if state.step_count >= state.max_steps:
             eff += self.HIT_MAX_STEPS
-        breakdown["efficiency"] = round(eff, 3)
+        b["efficiency"] = round(eff, 3)
 
-        raw = round(sum(breakdown.values()), 3)
+        raw = round(sum(b.values()), 3)
         if state.bug_2_exists:
             raw = round(raw * 0.5, 3)
-        breakdown["total"] = raw
-        return breakdown
+        b["total"] = raw
+        return b
 
-    def compute_bug_2_reward(self, state):
-        breakdown = {}
+    def compute_bug2(self, state):
+        b = {}
 
         if not state.diagnosis_submitted:
-            breakdown["diagnosis"] = self.BASE_SCORE + self.NO_DIAGNOSIS
+            b["diagnosis"] = self.BASE + self.NO_DIAG
         elif state.diagnosis_correct:
-            breakdown["diagnosis"] = self.BASE_SCORE + (self.CORRECT_DIAGNOSIS_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAGNOSIS_LATE)
+            b["diagnosis"] = self.BASE + (self.CORRECT_DIAG_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAG_LATE)
         elif state.diagnosis_partial:
-            breakdown["diagnosis"] = self.BASE_SCORE + self.PARTIAL_DIAGNOSIS
+            b["diagnosis"] = self.BASE + self.PARTIAL_DIAG
         else:
-            breakdown["diagnosis"] = self.BASE_SCORE + self.WRONG_DIAGNOSIS
+            b["diagnosis"] = self.BASE + self.WRONG_DIAG
 
         if state.edit_correct:
-            breakdown["edit"] = self.BASE_SCORE + (self.CORRECT_MINIMAL_FIX if state.edit_minimal else self.CORRECT_NONMINIMAL_FIX)
+            b["edit"] = self.BASE + (self.CORRECT_MINIMAL_FIX if state.edit_minimal else self.CORRECT_NONMINIMAL_FIX)
         else:
-            breakdown["edit"] = self.BASE_SCORE + self.PARTIAL_FIX
+            b["edit"] = self.BASE + self.PARTIAL_FIX
 
-        verify = self.BASE_SCORE
+        v = self.BASE
         if state.tests_run:
-            verify += self.RAN_TESTS
-            if state.tests_passed:
-                verify += self.TESTS_PASSED
+            v += self.RAN_TESTS
+            if state.tests_passed: v += self.TESTS_PASSED
         if not state.verified_before_submit:
-            verify += self.SUBMIT_WITHOUT_VERIFY
-        breakdown["verification"] = round(verify, 3)
+            v += self.SUBMIT_WITHOUT_VERIFY
+        b["verification"] = round(v, 3)
 
-        raw = round(sum(breakdown.values()), 3)
-        breakdown["total"] = round(raw * 0.5, 3)
-        return breakdown
+        raw = round(sum(b.values()), 3)
+        b["total"] = round(raw * 0.5, 3)
+        return b
 
+
+# --- Environment ---
 
 class CodeNavEnvironment(Environment):
+    """
+    CodeNav RL environment following OpenEnv API spec.
+    Per docs: SUPPORTS_CONCURRENT_SESSIONS=True for WebSocket multi-session.
+    Per RFC 004: rubric passed to super().__init__(rubric=...).
+    """
+
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     def __init__(self, task_id: str = "easy", scenario_index: int = None):
         if task_id not in ("easy", "medium", "hard"):
-            raise ValueError(f"task_id must be one of ['easy', 'medium', 'hard']")
-        # Call super().__init__() first per OpenEnv spec
+            raise ValueError(f"task_id must be 'easy', 'medium', or 'hard'")
+
+        # Per OpenEnv docs: call super().__init__() first with rubric
         self._rubric = CodeNavRubric()
         super().__init__(rubric=self._rubric)
-        # Then set environment state
+
         self._task_id = task_id
         self._scenario_index = scenario_index
         self._task = get_scenario(task_id, scenario_index)
         self._active_task = self._task
-        self._reward_computer = RewardComputer()
+        self._rc = RewardComputer()
         self._state: Optional[CodeNavState] = None
         self._files: Dict[str, str] = {}
-        self._wrong_diagnosis_count: int = 0
+        self._wrong_diag_count: int = 0
 
     def reset(self, seed=None, episode_id=None, **kwargs) -> CodeNavObservation:
+        """
+        Per OpenEnv API: reset() initializes episode, resets step_count to 0,
+        sets episode_id, returns initial Observation with reward field.
+        """
         task_id = kwargs.get("task_id", self._task_id)
         if task_id in ("easy", "medium", "hard"):
             self._task_id = task_id
+
         self._task = get_scenario(self._task_id, self._scenario_index)
         self._active_task = self._task
         self._files = dict(self._task["files"])
-        self._wrong_diagnosis_count = 0
+        self._wrong_diag_count = 0
+
+        # Per docs: State requires episode_id and step_count
         self._state = CodeNavState(
             episode_id=str(uuid4()),
             task_id=self._task_id,
@@ -210,6 +234,8 @@ class CodeNavEnvironment(Environment):
             done=False,
             bug_2_exists=self._task.get("bug_2") is not None,
         )
+
+        # Per docs: Observation.reward field — use safe non-zero value
         return CodeNavObservation(
             success=True,
             message=(
@@ -229,273 +255,241 @@ class CodeNavEnvironment(Environment):
         )
 
     def step(self, action: CodeNavAction) -> CodeNavObservation:
+        """
+        Per OpenEnv API: step() increments step_count, returns Observation
+        with reward and done fields.
+        """
         if self._state is None:
             raise RuntimeError("Call reset() before step()")
         if self._state.done:
-            return self._make_obs(success=False, message="Episode is already done.")
+            return self._obs(success=False, message="Episode is already done.")
 
         self._state.step_count += 1
 
         handlers = {
-            "read_file": self._handle_read_file,
-            "read_function": self._handle_read_function,
-            "search_codebase": self._handle_search_codebase,
-            "submit_diagnosis": self._handle_submit_diagnosis,
-            "identify_location": self._handle_identify_location,
-            "edit_code": self._handle_edit_code,
-            "add_code": self._handle_add_code,
-            "delete_code": self._handle_delete_code,
-            "run_tests": self._handle_run_tests,
-            "trace_execution": self._handle_trace_execution,
-            "submit": self._handle_submit,
+            "read_file":        self._read_file,
+            "read_function":    self._read_function,
+            "search_codebase":  self._search_codebase,
+            "submit_diagnosis": self._submit_diagnosis,
+            "identify_location":self._identify_location,
+            "edit_code":        self._edit_code,
+            "add_code":         self._add_code,
+            "delete_code":      self._delete_code,
+            "run_tests":        self._run_tests,
+            "trace_execution":  self._trace_execution,
+            "submit":           self._submit,
         }
 
         handler = handlers.get(action.action_type)
         if handler is None:
-            return self._make_obs(success=False, message=f"Unknown action_type: {action.action_type}")
+            return self._obs(success=False, message=f"Unknown action_type: {action.action_type}")
 
         obs = handler(action)
 
         if self._state.step_count >= self._state.max_steps and not self._state.done:
             self._state.done = True
-            obs.message += "\n[MAX STEPS REACHED — episode ending]"
+            obs.message += "\n[MAX STEPS REACHED]"
             obs.done = True
 
         return obs
 
     @property
     def state(self) -> CodeNavState:
+        """Per OpenEnv API: state property returns State with episode_id and step_count."""
         if self._state is None:
             self.reset()
         return self._state
 
-    def _handle_read_file(self, action):
+    # --- Action handlers ---
+
+    def _read_file(self, action):
         fname = action.filename
         if not fname or fname not in self._files:
-            return self._make_obs(success=False, message=f"File '{fname}' not found. Available: {list(self._files.keys())}")
-
+            return self._obs(success=False, message=f"File '{fname}' not found. Available: {list(self._files.keys())}")
         content = self._files[fname]
         line_count = len(content.splitlines())
-
         if fname not in self._state.files_read:
             self._state.files_read.append(fname)
             if fname in self._task["relevant_files"]:
                 self._state.relevant_files_read.append(fname)
             else:
                 self._state.irrelevant_files_read.append(fname)
-
         if len(self._state.files_read) / len(self._files) > 0.70:
             self._state.read_more_than_threshold = True
+        return self._obs(success=True, message=f"Read '{fname}' ({line_count} lines)",
+                         file_content=content, file_line_count=line_count)
 
-        return self._make_obs(success=True, message=f"Read file '{fname}' ({line_count} lines)",
-                              file_content=content, file_line_count=line_count)
-
-    def _handle_read_function(self, action):
-        fname = action.filename
-        func_name = action.function_name
+    def _read_function(self, action):
+        fname, func = action.filename, action.function_name
         if not fname or fname not in self._files:
-            return self._make_obs(success=False, message=f"File '{fname}' not found.")
-        if not func_name:
-            return self._make_obs(success=False, message="function_name is required.")
-
-        extracted = self._extract_function(self._files[fname], func_name)
+            return self._obs(success=False, message=f"File '{fname}' not found.")
+        if not func:
+            return self._obs(success=False, message="function_name is required.")
+        extracted = self._extract_function(self._files[fname], func)
         if extracted is None:
-            return self._make_obs(success=False, message=f"Function '{func_name}' not found in '{fname}'.")
-
+            return self._obs(success=False, message=f"Function '{func}' not found in '{fname}'.")
         if fname not in self._state.files_read:
             self._state.files_read.append(fname)
             if fname in self._task["relevant_files"]:
                 self._state.relevant_files_read.append(fname)
             else:
                 self._state.irrelevant_files_read.append(fname)
+        return self._obs(success=True, message=f"Read function '{func}' from '{fname}'",
+                         file_content=extracted, file_line_count=len(extracted.splitlines()))
 
-        return self._make_obs(success=True, message=f"Read function '{func_name}' from '{fname}'",
-                              file_content=extracted, file_line_count=len(extracted.splitlines()))
-
-    def _handle_search_codebase(self, action):
+    def _search_codebase(self, action):
         query = action.query
         if not query:
-            return self._make_obs(success=False, message="query is required.")
-
+            return self._obs(success=False, message="query is required.")
         results = []
         for fname, content in self._files.items():
             for i, line in enumerate(content.splitlines(), 1):
                 if query.lower() in line.lower():
                     results.append({"file": fname, "line": i, "content": line.strip()})
+        return self._obs(success=True, message=f"Search '{query}' returned {len(results)} results.",
+                         search_results=results)
 
-        return self._make_obs(success=True, message=f"Search for '{query}' returned {len(results)} results.",
-                              search_results=results)
-
-    def _handle_submit_diagnosis(self, action):
+    def _submit_diagnosis(self, action):
         diagnosis = action.diagnosis
         if not diagnosis:
-            return self._make_obs(success=False, message="diagnosis is required.")
-
+            return self._obs(success=False, message="diagnosis is required.")
         keywords = self._active_task["correct_diagnosis_keywords"]
-        diagnosis_lower = diagnosis.lower()
-        is_correct = any(kw.lower() in diagnosis_lower for kw in keywords)
-        is_partial = not is_correct and any(kw.split()[0].lower() in diagnosis_lower for kw in keywords)
-
+        d_lower = diagnosis.lower()
+        is_correct = any(kw.lower() in d_lower for kw in keywords)
+        is_partial = not is_correct and any(kw.split()[0].lower() in d_lower for kw in keywords)
         if is_correct:
             self._state.diagnosis_correct = True
             self._state.diagnosis_partial = False
             if self._state.edits_made == 0:
                 self._state.diagnosis_before_edit = True
-            feedback = "Your diagnosis matches the root cause. Proceed with the fix."
+            feedback = "Diagnosis matches root cause. Proceed with fix."
         elif is_partial:
             self._state.diagnosis_partial = True
-            feedback = "You are on the right track but the diagnosis is incomplete."
+            feedback = "On the right track but incomplete."
         else:
             self._state.diagnosis_correct = False
             self._state.diagnosis_partial = False
-            feedback = "Diagnosis does not match the root cause. Keep investigating."
-
+            feedback = "Diagnosis does not match root cause."
         self._state.diagnosis_submitted = True
-        return self._make_obs(success=True, message="Diagnosis submitted.", diagnosis_feedback=feedback)
+        return self._obs(success=True, message="Diagnosis submitted.", diagnosis_feedback=feedback)
 
-    def _handle_identify_location(self, action):
+    def _identify_location(self, action):
         fname = action.filename
         bug_loc = self._task["bug_location"]
         if fname == bug_loc["file"]:
             ls, le = action.line_start, action.line_end
             if ls is not None and le is not None:
                 overlap = not (le < bug_loc["line_start"] or ls > bug_loc["line_end"])
-                feedback = "Location identified correctly." if overlap else "Wrong line range."
+                feedback = "Location correct." if overlap else "Wrong line range."
             else:
                 feedback = "Provide line_start and line_end."
         else:
-            feedback = f"Wrong file. The bug is not in '{fname}'."
-        return self._make_obs(success=True, message="Location submitted.", diagnosis_feedback=feedback)
+            feedback = f"Wrong file. Bug is not in '{fname}'."
+        return self._obs(success=True, message="Location submitted.", diagnosis_feedback=feedback)
 
-    def _handle_edit_code(self, action):
+    def _edit_code(self, action):
         fname, old_code, new_code = action.filename, action.old_code, action.new_code
         if not fname or fname not in self._files:
-            return self._make_obs(success=False, message=f"File '{fname}' not found.")
+            return self._obs(success=False, message=f"File '{fname}' not found.")
         if old_code is None or new_code is None:
-            return self._make_obs(success=False, message="old_code and new_code are required.")
-
+            return self._obs(success=False, message="old_code and new_code are required.")
         if fname not in self._state.files_read:
-            self._state.cumulative_reward += RewardComputer.EDIT_WITHOUT_READING
-
+            self._state.cumulative_reward += RewardComputer.EDIT_WITHOUT_READ
         content = self._files[fname]
         if old_code not in content:
-            return self._make_obs(success=False, message="old_code not found in file. Check exact whitespace and indentation.")
-
+            return self._obs(success=False, message="old_code not found in file.")
         new_content = content.replace(old_code, new_code, 1)
         diff = "\n".join(difflib.unified_diff(content.splitlines(), new_content.splitlines(),
                                                fromfile=f"a/{fname}", tofile=f"b/{fname}", lineterm=""))
-
         if not self._check_syntax(new_content):
-            return self._make_obs(success=False, message="Edit rejected — not valid Python.", diff=diff, syntax_valid=False)
-
+            return self._obs(success=False, message="Edit rejected — invalid Python.", diff=diff, syntax_valid=False)
         self._files[fname] = new_content
         self._state.edits_made += 1
         self._state.edit_correct = self._silent_test_run()
         if self._state.edit_correct:
             lines_changed = max(len(old_code.strip().splitlines()), len(new_code.strip().splitlines()))
             self._state.edit_minimal = lines_changed <= 5
-
         scope_warning = None
         if fname in self._task.get("irrelevant_files", []):
-            scope_warning = f"Warning: '{fname}' is outside the expected scope."
+            scope_warning = f"Warning: '{fname}' is outside expected scope."
+        return self._obs(success=True, message=f"Edit applied to '{fname}'.",
+                         diff=diff, syntax_valid=True, scope_warning=scope_warning)
 
-        return self._make_obs(success=True, message=f"Edit applied to '{fname}'.",
-                              diff=diff, syntax_valid=True, scope_warning=scope_warning)
-
-    def _handle_add_code(self, action):
+    def _add_code(self, action):
         fname, new_code = action.filename, action.new_code
         location = action.location or "bottom"
         if not fname or fname not in self._files:
-            return self._make_obs(success=False, message=f"File '{fname}' not found.")
+            return self._obs(success=False, message=f"File '{fname}' not found.")
         if not new_code:
-            return self._make_obs(success=False, message="new_code is required.")
-
+            return self._obs(success=False, message="new_code is required.")
         content = self._files[fname]
         if location == "top":
             new_content = new_code + "\n" + content
         elif location.startswith("after:"):
             new_content = self._insert_after_function(content, location.split("after:", 1)[1], new_code)
             if new_content is None:
-                return self._make_obs(success=False, message="Function not found for after: insertion.")
+                return self._obs(success=False, message="Function not found for after: insertion.")
         else:
             new_content = content + "\n" + new_code
-
         if not self._check_syntax(new_content):
-            return self._make_obs(success=False, message="Add rejected — not valid Python.", syntax_valid=False)
-
+            return self._obs(success=False, message="Add rejected — invalid Python.", syntax_valid=False)
         diff = "\n".join(difflib.unified_diff(content.splitlines(), new_content.splitlines(),
                                                fromfile=f"a/{fname}", tofile=f"b/{fname}", lineterm=""))
         self._files[fname] = new_content
         self._state.edits_made += 1
-        return self._make_obs(success=True, message=f"Code added to '{fname}'.", diff=diff, syntax_valid=True)
+        return self._obs(success=True, message=f"Code added to '{fname}'.", diff=diff, syntax_valid=True)
 
-    def _handle_delete_code(self, action):
-        fname, target_code = action.filename, action.target_code
+    def _delete_code(self, action):
+        fname, target = action.filename, action.target_code
         if not fname or fname not in self._files:
-            return self._make_obs(success=False, message=f"File '{fname}' not found.")
-        if not target_code:
-            return self._make_obs(success=False, message="target_code is required.")
-
+            return self._obs(success=False, message=f"File '{fname}' not found.")
+        if not target:
+            return self._obs(success=False, message="target_code is required.")
         content = self._files[fname]
-        if target_code not in content:
-            return self._make_obs(success=False, message="target_code not found in file.")
-
-        new_content = content.replace(target_code, "", 1)
+        if target not in content:
+            return self._obs(success=False, message="target_code not found in file.")
+        new_content = content.replace(target, "", 1)
         if not self._check_syntax(new_content):
-            return self._make_obs(success=False, message="Delete rejected — not valid Python.", syntax_valid=False)
-
+            return self._obs(success=False, message="Delete rejected — invalid Python.", syntax_valid=False)
         diff = "\n".join(difflib.unified_diff(content.splitlines(), new_content.splitlines(),
                                                fromfile=f"a/{fname}", tofile=f"b/{fname}", lineterm=""))
         self._files[fname] = new_content
         self._state.edits_made += 1
-        return self._make_obs(success=True, message=f"Code deleted from '{fname}'.", diff=diff, syntax_valid=True)
+        return self._obs(success=True, message=f"Code deleted from '{fname}'.", diff=diff, syntax_valid=True)
 
-    def _handle_run_tests(self, action):
+    def _run_tests(self, action):
         self._state.tests_run = True
         self._state.verified_before_submit = True
-
         test_files = {k: v for k, v in self._files.items() if k.startswith("test_")}
         all_results = {}
         overall_passed = True
-
         for test_fname, test_content in test_files.items():
             results = self._run_test_file(test_fname, test_content)
             all_results[test_fname] = results
             if not results.get("all_passed", False):
                 overall_passed = False
-
         self._state.tests_passed = overall_passed
         total_pass = sum(r.get("passed", 0) for r in all_results.values())
         total_fail = sum(r.get("failed", 0) for r in all_results.values())
-
-        test_result_payload = {
-            "files": all_results,
-            "overall_passed": overall_passed,
-            "total_passed": total_pass,
-            "total_failed": total_fail,
-        }
-
+        payload = {"files": all_results, "overall_passed": overall_passed,
+                   "total_passed": total_pass, "total_failed": total_fail}
         bug_2_def = self._task.get("bug_2")
         if (overall_passed and self._state.current_bug == 1 and
                 self._state.bug_2_exists and bug_2_def is not None and
                 not self._state.bug_1_fixed):
-
             self._state.bug_1_fixed = True
             self._state.current_bug = 2
             self._state.diagnosis_submitted = False
-            self._wrong_diagnosis_count = 0
-
-            for fname, extra_tests in bug_2_def.get("test_additions", {}).items():
-                if fname in self._files:
-                    self._files[fname] += extra_tests
-
+            self._wrong_diag_count = 0
+            for fn, extra in bug_2_def.get("test_additions", {}).items():
+                if fn in self._files:
+                    self._files[fn] += extra
             self._active_task = {
                 **self._task,
                 "relevant_files": bug_2_def["relevant_files"],
                 "correct_diagnosis_keywords": bug_2_def["correct_diagnosis_keywords"],
                 "correct_fix": bug_2_def["correct_fix"],
             }
-
             self._state.diagnosis_correct = None
             self._state.diagnosis_partial = None
             self._state.diagnosis_before_edit = False
@@ -505,79 +499,70 @@ class CodeNavEnvironment(Environment):
             self._state.tests_passed = None
             self._state.verified_before_submit = False
             self._state.edits_made = 0
-
-            bug_2_msg = (
-                f"\n\n{'='*50}\n"
-                f"Bug 1 fixed! New issue reported:\n"
-                f"{bug_2_def['description']}\n"
-                f"Continue investigating."
-            )
-            return self._make_obs(
-                success=True,
-                message=f"Tests complete: {total_pass} passed, {total_fail} failed.{bug_2_msg}",
-                test_results=test_result_payload,
-            )
-
+            bug2_msg = (f"\n\n{'='*50}\nBug 1 fixed! New issue:\n"
+                        f"{bug_2_def['description']}\nContinue investigating.")
+            return self._obs(success=True,
+                             message=f"Tests: {total_pass} passed, {total_fail} failed.{bug2_msg}",
+                             test_results=payload)
         if overall_passed and self._state.current_bug == 2 and not self._state.bug_2_fixed:
             self._state.bug_2_fixed = True
+        return self._obs(success=True, message=f"Tests: {total_pass} passed, {total_fail} failed.",
+                         test_results=payload)
 
-        return self._make_obs(success=True,
-                              message=f"Tests complete: {total_pass} passed, {total_fail} failed.",
-                              test_results=test_result_payload)
-
-    def _handle_trace_execution(self, action):
+    def _trace_execution(self, action):
         func_name = action.function_name
         if not func_name:
-            return self._make_obs(success=False, message="function_name is required.")
-
+            return self._obs(success=False, message="function_name is required.")
         self._state.verified_before_submit = True
         target_file = None
         for fname, content in self._files.items():
             if f"def {func_name}" in content:
                 target_file = (fname, content)
                 break
-
         if target_file is None:
-            return self._make_obs(success=False, message=f"Function '{func_name}' not found.")
-
+            return self._obs(success=False, message=f"Function '{func_name}' not found.")
         fname, content = target_file
-        result = self._safe_execute_function(content, func_name, action.input_args or {})
-        return self._make_obs(success=True, message=f"Traced '{func_name}' from '{fname}'.",
-                              execution_trace=result)
+        result = self._safe_execute(content, func_name, action.input_args or {})
+        return self._obs(success=True, message=f"Traced '{func_name}' from '{fname}'.",
+                         execution_trace=result)
 
-    def _handle_submit(self, action):
+    def _submit(self, action):
         if self._state is None:
             raise RuntimeError("Call reset() first.")
-
         self._state.done = True
-        breakdown = self._reward_computer.compute_final_reward(self._state, self._task)
+
+        # Compute rewards per RFC 004 rubric pattern
+        breakdown = self._rc.compute(self._state, self._task)
 
         if self._state.bug_2_exists:
-            bug_2_breakdown = self._reward_computer.compute_bug_2_reward(self._state)
-            breakdown["bug_2_total"] = bug_2_breakdown["total"]
-            breakdown["total"] = round(breakdown["total"] + bug_2_breakdown["total"], 3)
-            breakdown.update({f"bug2_{k}": v for k, v in bug_2_breakdown.items() if k != "total"})
+            b2 = self._rc.compute_bug2(self._state)
+            breakdown["bug_2_total"] = b2["total"]
+            breakdown["total"] = round(breakdown["total"] + b2["total"], 3)
+            breakdown.update({f"bug2_{k}": v for k, v in b2.items() if k != "total"})
 
-        # Clamp ALL breakdown values to strictly (0, 1) — validator checks every score
+        # Clamp all breakdown values strictly between 0 and 1
         for k in list(breakdown.keys()):
             if breakdown[k] is not None:
                 breakdown[k] = _clamp(float(breakdown[k]))
+
         total = breakdown["total"]
         self._state.cumulative_reward += total
 
-        # Update the rubric with the final score
+        # Per RFC 004: update rubric score so forward() returns valid value
         self._rubric.set_score(total)
-        
-        return self._make_obs(
+
+        return self._obs(
             success=True,
-            message=f"Episode complete. Final score: {total:.3f}",
+            message=f"Episode complete. Score: {total:.3f}",
             final_score=total,
             score_breakdown=breakdown,
             done=True,
             reward=total,
         )
 
-    def _make_obs(self, success: bool, message: str, **kwargs) -> CodeNavObservation:
+    # --- Observation factory ---
+
+    def _obs(self, success: bool, message: str, **kwargs) -> CodeNavObservation:
         if self._state is None:
             step, max_s, files, read, edits, diag, tests = 0, 0, [], [], 0, False, False
         else:
@@ -589,13 +574,13 @@ class CodeNavEnvironment(Environment):
             diag  = self._state.diagnosis_submitted
             tests = self._state.tests_run
 
-        # Always clamp final_score if present
+        # Clamp final_score and reward if present
         if "final_score" in kwargs and kwargs["final_score"] is not None:
             kwargs["final_score"] = _clamp(kwargs["final_score"])
-            kwargs["reward"] = kwargs.get("reward", kwargs["final_score"])
-            if kwargs["reward"] is not None:
-                kwargs["reward"] = _clamp(kwargs["reward"])
+        if "reward" in kwargs and kwargs["reward"] is not None:
+            kwargs["reward"] = _clamp(kwargs["reward"])
 
+        # Per OpenEnv docs: Observation.reward is the reward signal
         return CodeNavObservation(
             success=success,
             message=message,
@@ -610,6 +595,8 @@ class CodeNavEnvironment(Environment):
             reward=kwargs.pop("reward", 0.15),
             **kwargs,
         )
+
+    # --- Helpers ---
 
     def _extract_function(self, source: str, func_name: str) -> Optional[str]:
         try:
@@ -642,12 +629,9 @@ class CodeNavEnvironment(Environment):
             return False
 
     def _build_module_registry(self):
-        import sys
-        import types
-
+        import sys, types
         module_objects = {}
         original_modules = {}
-
         for f in self._files:
             if not f.startswith("test_"):
                 name = f.replace(".py", "")
@@ -656,9 +640,7 @@ class CodeNavEnvironment(Environment):
                 module_objects[name] = mod
                 original_modules[name] = sys.modules.get(name)
                 sys.modules[name] = mod
-
         pending = {f: src for f, src in self._files.items() if not f.startswith("test_")}
-
         for _ in range(len(pending) + 1):
             if not pending:
                 break
@@ -672,7 +654,6 @@ class CodeNavEnvironment(Environment):
             if len(still_failing) == len(pending):
                 break
             pending = still_failing
-
         return module_objects, original_modules
 
     def _restore_modules(self, original_modules) -> None:
@@ -693,11 +674,9 @@ class CodeNavEnvironment(Environment):
             return {"error": str(e), "passed": 0, "failed": 0, "all_passed": False}
         finally:
             self._restore_modules(original_modules)
-
         test_funcs = {k: v for k, v in namespace.items() if k.startswith("test_") and callable(v)}
         results = {}
         passed = failed = 0
-
         for name, func in test_funcs.items():
             try:
                 func()
@@ -709,7 +688,6 @@ class CodeNavEnvironment(Environment):
             except Exception as e:
                 results[name] = {"status": "ERROR", "error": str(e)}
                 failed += 1
-
         return {"tests": results, "passed": passed, "failed": failed, "all_passed": failed == 0}
 
     def _silent_test_run(self) -> bool:
@@ -721,7 +699,7 @@ class CodeNavEnvironment(Environment):
                 return False
         return True
 
-    def _safe_execute_function(self, source: str, func_name: str, input_args: Dict[str, Any]) -> Dict[str, Any]:
+    def _safe_execute(self, source: str, func_name: str, input_args: Dict[str, Any]) -> Dict[str, Any]:
         namespace: Dict[str, Any] = {}
         for f, src in self._files.items():
             try:
