@@ -191,7 +191,7 @@ class CodeNavEnvironment(Environment):
 
     def step(self, action: CodeNavAction) -> CodeNavObservation:
         if self._state is None:
-            self.reset()
+            raise RuntimeError("Call reset() before step()")
         if self._state.done:
             return self._make_obs(success=False, message="Episode is already done.")
 
@@ -227,7 +227,7 @@ class CodeNavEnvironment(Environment):
     @property
     def state(self) -> CodeNavState:
         if self._state is None:
-            raise RuntimeError("Call reset() before accessing state")
+            self.reset()
         return self._state
 
     def _handle_read_file(self, action):
@@ -520,10 +520,8 @@ class CodeNavEnvironment(Environment):
             breakdown.update({f"bug2_{k}": v for k, v in bug_2_breakdown.items() if k != "total"})
 
         # Clamp to strictly (0, 1) — validator requires score not be exactly 0.0 or 1.0
-        for k in breakdown:
-            if breakdown[k] is not None:
-                breakdown[k] = _clamp(breakdown[k])
-        total = breakdown["total"]
+        total = _clamp(breakdown["total"])
+        breakdown["total"] = total
         self._state.cumulative_reward += total
 
         return self._make_obs(
