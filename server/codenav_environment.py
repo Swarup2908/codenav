@@ -522,9 +522,11 @@ class CodeNavEnvironment(Environment):
             breakdown["total"] = round(breakdown["total"] + bug_2_breakdown["total"], 3)
             breakdown.update({f"bug2_{k}": v for k, v in bug_2_breakdown.items() if k != "total"})
 
-        # Clamp to strictly (0, 1) — validator requires score not be exactly 0.0 or 1.0
-        total = _clamp(breakdown["total"])
-        breakdown["total"] = total
+        # Clamp ALL breakdown values to strictly (0, 1) — validator checks every score
+        for k in list(breakdown.keys()):
+            if breakdown[k] is not None:
+                breakdown[k] = _clamp(float(breakdown[k]))
+        total = breakdown["total"]
         self._state.cumulative_reward += total
 
         return self._make_obs(
