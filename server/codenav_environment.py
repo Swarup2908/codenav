@@ -28,7 +28,7 @@ except ImportError:
 
 def _clamp(score: float) -> float:
     """Clamp score to strictly (0, 1) — never exactly 0.0 or 1.0."""
-    return round(max(0.1, min(0.9, float(score))), 3)
+    return round(max(0.001, min(0.999, float(score))), 3)
 
 
 class RewardComputer:
@@ -61,7 +61,7 @@ class RewardComputer:
     def compute_final_reward(self, state, task):
         breakdown = {}
 
-        read_score = self.BASE_SCORE
+        read_score = 0.0
         for f in state.relevant_files_read:
             read_score += self.RELEVANT_FILE_READ
         for f in state.irrelevant_files_read:
@@ -71,28 +71,28 @@ class RewardComputer:
         breakdown["reading"] = round(read_score, 3)
 
         if not state.diagnosis_submitted:
-            diag = self.BASE_SCORE + self.NO_DIAGNOSIS
+            diag = self.NO_DIAGNOSIS
         elif state.diagnosis_correct:
-            diag = self.BASE_SCORE + (self.CORRECT_DIAGNOSIS_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAGNOSIS_LATE)
+            diag = self.CORRECT_DIAGNOSIS_EARLY if state.diagnosis_before_edit else self.CORRECT_DIAGNOSIS_LATE
         elif state.diagnosis_partial:
-            diag = self.BASE_SCORE + self.PARTIAL_DIAGNOSIS
+            diag = self.PARTIAL_DIAGNOSIS
         else:
-            diag = self.BASE_SCORE + self.WRONG_DIAGNOSIS
+            diag = self.WRONG_DIAGNOSIS
         breakdown["diagnosis"] = round(diag, 3)
 
-        edit = self.BASE_SCORE
+        edit = 0.0
         if state.edit_correct is not None:
             if state.edit_correct and state.edit_minimal:
-                edit = self.BASE_SCORE + self.CORRECT_MINIMAL_FIX
+                edit = self.CORRECT_MINIMAL_FIX
             elif state.edit_correct:
-                edit = self.BASE_SCORE + self.CORRECT_NONMINIMAL_FIX
+                edit = self.CORRECT_NONMINIMAL_FIX
             else:
-                edit = self.BASE_SCORE + self.PARTIAL_FIX
+                edit = self.PARTIAL_FIX
             if state.tests_passed is False and state.tests_run:
                 edit += self.FIX_BROKE_TESTS
         breakdown["edit"] = round(edit, 3)
 
-        verify = self.BASE_SCORE
+        verify = 0.0
         if state.tests_run:
             verify += self.RAN_TESTS
             if state.tests_passed:
@@ -101,18 +101,20 @@ class RewardComputer:
             verify += self.SUBMIT_WITHOUT_VERIFY
         breakdown["verification"] = round(verify, 3)
 
-        eff = self.BASE_SCORE
+        eff = 0.0
         ratio = state.step_count / state.max_steps
         if state.done and state.edit_correct:
             if ratio <= 0.60:
-                eff = self.BASE_SCORE + self.EFFICIENCY_HIGH
+                eff = self.EFFICIENCY_HIGH
             elif ratio <= 0.80:
-                eff = self.BASE_SCORE + self.EFFICIENCY_MED
+                eff = self.EFFICIENCY_MED
         if state.step_count >= state.max_steps:
             eff += self.HIT_MAX_STEPS
         breakdown["efficiency"] = round(eff, 3)
 
         raw = round(sum(breakdown.values()), 3)
+        # Add base score to ensure total is always > 0
+        raw = round(raw + self.BASE_SCORE, 3)
         if state.bug_2_exists:
             raw = round(raw * 0.5, 3)
         breakdown["total"] = raw
@@ -195,7 +197,7 @@ class CodeNavEnvironment(Environment):
             diagnosis_submitted=False,
             tests_run=False,
             done=False,
-            reward=0.001,
+            reward=0.15,
         )
 
     def step(self, action: CodeNavAction) -> CodeNavObservation:
@@ -574,7 +576,7 @@ class CodeNavEnvironment(Environment):
             diagnosis_submitted=diag,
             tests_run=tests,
             done=kwargs.pop("done", False),
-            reward=kwargs.pop("reward", 0.001),
+            reward=kwargs.pop("reward", 0.15),
             **kwargs,
         )
 
