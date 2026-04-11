@@ -32,25 +32,31 @@ def _clamp(score: float) -> float:
 
 
 class RewardComputer:
-    RELEVANT_FILE_READ = 0.05
-    IRRELEVANT_FILE_READ = -0.05
-    EDIT_WITHOUT_READING = -0.15
-    BRUTE_FORCE_READ_PENALTY = -0.10
-    CORRECT_DIAGNOSIS_EARLY = 0.20
-    CORRECT_DIAGNOSIS_LATE = 0.10
-    PARTIAL_DIAGNOSIS = 0.08
-    NO_DIAGNOSIS = -0.10
-    WRONG_DIAGNOSIS = -0.15
-    CORRECT_MINIMAL_FIX = 0.30
-    CORRECT_NONMINIMAL_FIX = 0.20
-    PARTIAL_FIX = 0.10
-    FIX_BROKE_TESTS = -0.15
-    RAN_TESTS = 0.05
-    TESTS_PASSED = 0.10
-    SUBMIT_WITHOUT_VERIFY = -0.10
-    EFFICIENCY_HIGH = 0.10
-    EFFICIENCY_MED = 0.05
-    HIT_MAX_STEPS = -0.10
+    # Base score — every agent starts here, guarantees score > 0
+    BASE_SCORE = 0.15
+
+    # Positive rewards
+    RELEVANT_FILE_READ = 0.03
+    CORRECT_DIAGNOSIS_EARLY = 0.15
+    CORRECT_DIAGNOSIS_LATE = 0.08
+    PARTIAL_DIAGNOSIS = 0.05
+    NO_DIAGNOSIS = 0.0
+    CORRECT_MINIMAL_FIX = 0.25
+    CORRECT_NONMINIMAL_FIX = 0.18
+    PARTIAL_FIX = 0.08
+    RAN_TESTS = 0.04
+    TESTS_PASSED = 0.08
+    EFFICIENCY_HIGH = 0.08
+    EFFICIENCY_MED = 0.04
+
+    # Small penalties (capped so score never goes below 0.1 after clamping)
+    IRRELEVANT_FILE_READ = -0.02
+    EDIT_WITHOUT_READING = -0.05
+    BRUTE_FORCE_READ_PENALTY = -0.05
+    WRONG_DIAGNOSIS = -0.05
+    FIX_BROKE_TESTS = -0.08
+    SUBMIT_WITHOUT_VERIFY = -0.05
+    HIT_MAX_STEPS = -0.05
 
     def compute_final_reward(self, state, task):
         breakdown = {}
@@ -107,6 +113,8 @@ class RewardComputer:
         breakdown["efficiency"] = round(eff, 3)
 
         raw = round(sum(breakdown.values()), 3)
+        # Add base score to ensure total is always > 0
+        raw = round(raw + self.BASE_SCORE, 3)
         if state.bug_2_exists:
             raw = round(raw * 0.5, 3)
         breakdown["total"] = raw
@@ -138,7 +146,7 @@ class RewardComputer:
             verify += self.SUBMIT_WITHOUT_VERIFY
         breakdown["verification"] = round(verify, 3)
 
-        raw = round(sum(breakdown.values()), 3)
+        raw = round(sum(breakdown.values()) + self.BASE_SCORE, 3)
         breakdown["total"] = round(raw * 0.5, 3)
         return breakdown
 
