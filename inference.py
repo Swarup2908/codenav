@@ -171,7 +171,7 @@ def run_episode(client: OpenAI, task_id: str) -> dict:
 
     # Reset
     try:
-        resp = requests.post(f"{SPACE_URL}/reset", json={}, timeout=60)
+        resp = requests.post(f"{SPACE_URL}/reset", json={"task_id": task_id}, timeout=60)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
