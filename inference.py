@@ -38,16 +38,16 @@ def log_start(task: str, env: str, model: str) -> None:
 
 def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
     print(
-        f"[STEP] step={step} action={action} reward={reward:.3f} "
+        f"[STEP] step={step} action={action} reward={reward} "
         f"done={str(done).lower()} error={error if error else 'null'}",
         flush=True,
     )
 
 def log_end(success: bool, steps: int, rewards: List[float]) -> None:
-    safe = [max(0.001, min(0.999, r)) for r in rewards] if rewards else [0.001]
+    safe = rewards if rewards else [0.0]
     print(
         f"[END] success={str(success).lower()} steps={steps} "
-        f"rewards={','.join(f'{r:.3f}' for r in safe)}",
+        f"rewards={','.join(str(r) for r in safe)}",
         flush=True,
     )
 
@@ -206,7 +206,7 @@ async def run_episode_async(client: OpenAI, task_id: str) -> dict:
                     parse_errors += 1
                     messages.append({"role": "assistant", "content": response_text})
                     messages.append({"role": "user", "content": "ERROR: Invalid JSON. Respond with ONLY a JSON object."})
-                    log_step(steps_taken + 1, "parse_error", 0.15, False, "invalid_json")
+                    log_step(steps_taken + 1, "parse_error", 0.0, False, "invalid_json")
                     if parse_errors >= MAX_PARSE_ERRORS:
                         # Submit to get a real score instead of returning 0.001
                         try:
@@ -217,7 +217,7 @@ async def run_episode_async(client: OpenAI, task_id: str) -> dict:
                             if obs.get("final_score") is not None:
                                 reward = float(obs["final_score"])
                                 final_score = reward
-                                success = final_score > 0
+                                success = bool(obs.get("success", False))
                                 rewards.append(reward)
                                 log_step(steps_taken + 1, "submit", reward, True, None)
                         except Exception:
@@ -234,18 +234,18 @@ async def run_episode_async(client: OpenAI, task_id: str) -> dict:
 
                 if resp.get("type") == "error":
                     err_msg = resp.get("data", {}).get("message", "ws_error")[:80]
-                    log_step(steps_taken, action_dict.get("action_type", "unknown"), 0.15, True, err_msg)
+                    log_step(steps_taken, action_dict.get("action_type", "unknown"), 0.0, True, err_msg)
                     break
 
                 data = resp.get("data", {})
                 obs = data.get("observation", {})
-                reward = max(0.001, float(data.get("reward", 0.001) or 0.001))
+                reward = float(data.get("reward", 0.0))
                 done = bool(data.get("done", False))
 
                 if obs.get("final_score") is not None:
                     reward = float(obs["final_score"])
                     final_score = reward
-                    success = final_score > 0
+                    success = bool(obs.get("success", False))
 
                 rewards.append(reward)
 
@@ -267,7 +267,7 @@ async def run_episode_async(client: OpenAI, task_id: str) -> dict:
 
                 max_steps = obs.get("max_steps", max_steps)
                 if steps_taken >= max_steps:
-                    log_step(steps_taken + 1, "timeout", 0.15, True, "max_steps_reached")
+                    log_step(steps_taken + 1, "timeout", 0.0, True, "max_steps_reached")
                     break
 
     except Exception as e:
@@ -326,7 +326,7 @@ async def run_episode_http(client: OpenAI, task_id: str) -> dict:
             parse_errors += 1
             messages.append({"role": "assistant", "content": response_text})
             messages.append({"role": "user", "content": "ERROR: Invalid JSON. Respond with ONLY a JSON object."})
-            log_step(steps_taken + 1, "parse_error", 0.15, False, "invalid_json")
+            log_step(steps_taken + 1, "parse_error", 0.0, False, "invalid_json")
             if parse_errors >= MAX_PARSE_ERRORS:
                 break
             continue
@@ -336,17 +336,17 @@ async def run_episode_http(client: OpenAI, task_id: str) -> dict:
 
         data = http_post("/step", {"action": action_dict})
         if not data:
-            log_step(steps_taken, action_dict.get("action_type", "unknown"), 0.15, True, "http_error")
+            log_step(steps_taken, action_dict.get("action_type", "unknown"), 0.0, True, "http_error")
             break
 
         obs = data.get("observation", {})
-        reward = max(0.001, float(data.get("reward", 0.001) or 0.001))
+        reward = float(data.get("reward", 0.0))
         done = bool(data.get("done", False))
 
         if obs.get("final_score") is not None:
             reward = float(obs["final_score"])
             final_score = reward
-            success = final_score > 0
+            success = bool(obs.get("success", False))
 
         rewards.append(reward)
 
@@ -368,7 +368,7 @@ async def run_episode_http(client: OpenAI, task_id: str) -> dict:
 
         max_steps = obs.get("max_steps", max_steps)
         if steps_taken >= max_steps:
-            log_step(steps_taken + 1, "timeout", 0.15, True, "max_steps_reached")
+            log_step(steps_taken + 1, "timeout", 0.0, True, "max_steps_reached")
             break
 
     return {"final_score": final_score, "steps_taken": steps_taken, "rewards": rewards, "success": success}

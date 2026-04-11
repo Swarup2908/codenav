@@ -45,10 +45,10 @@ class CodeNavRubric(Rubric):
         self._score = 0.5
 
     def forward(self, action, observation) -> float:
-        return round(max(0.12, min(0.88, float(self._score))), 3)
+        return max(0.001, min(0.999, float(self._score)))
 
     def set_score(self, score: float) -> None:
-        self._score = max(0.12, min(0.88, float(score)))
+        self._score = max(0.001, min(0.999, float(score)))
 
 
 # --- Models ---
@@ -64,8 +64,7 @@ except ImportError:
 
 
 def _clamp(v: float) -> float:
-    """Clamp to strictly (0, 1) with safe buffer."""
-    return round(max(0.12, min(0.88, float(v))), 3)
+    return max(0.001, min(0.999, float(v)))
 
 
 # --- Reward Computer ---
@@ -101,7 +100,7 @@ class RewardComputer:
         for _ in state.relevant_files_read:   r += self.RELEVANT_FILE_READ
         for _ in state.irrelevant_files_read: r += self.IRRELEVANT_FILE_READ
         if state.read_more_than_threshold:    r += self.BRUTE_FORCE_PENALTY
-        b["reading"] = round(r, 3)
+        b["reading"] = r
 
         # Diagnosis
         if not state.diagnosis_submitted:
@@ -112,7 +111,7 @@ class RewardComputer:
             d = self.BASE + self.PARTIAL_DIAG
         else:
             d = self.BASE + self.WRONG_DIAG
-        b["diagnosis"] = round(d, 3)
+        b["diagnosis"] = d
 
         # Edit
         e = self.BASE
@@ -125,7 +124,7 @@ class RewardComputer:
                 e = self.BASE + self.PARTIAL_FIX
             if state.tests_passed is False and state.tests_run:
                 e += self.FIX_BROKE_TESTS
-        b["edit"] = round(e, 3)
+        b["edit"] = e
 
         # Verification
         v = self.BASE
@@ -135,7 +134,7 @@ class RewardComputer:
                 v += self.TESTS_PASSED
         if not state.verified_before_submit:
             v += self.SUBMIT_WITHOUT_VERIFY
-        b["verification"] = round(v, 3)
+        b["verification"] = v
 
         # Efficiency
         eff = self.BASE
@@ -145,11 +144,11 @@ class RewardComputer:
             elif ratio <= 0.80: eff = self.BASE + self.EFFICIENCY_MED
         if state.step_count >= state.max_steps:
             eff += self.HIT_MAX_STEPS
-        b["efficiency"] = round(eff, 3)
+        b["efficiency"] = eff
 
-        raw = round(sum(b.values()), 3)
+        raw = sum(b.values())
         if state.bug_2_exists:
-            raw = round(raw * 0.5, 3)
+            raw = raw * 0.5
         b["total"] = raw
         return b
 
@@ -176,10 +175,10 @@ class RewardComputer:
             if state.tests_passed: v += self.TESTS_PASSED
         if not state.verified_before_submit:
             v += self.SUBMIT_WITHOUT_VERIFY
-        b["verification"] = round(v, 3)
+        b["verification"] = v
 
-        raw = round(sum(b.values()), 3)
-        b["total"] = round(raw * 0.5, 3)
+        raw = sum(b.values())
+        b["total"] = raw * 0.5
         return b
 
 
@@ -537,13 +536,9 @@ class CodeNavEnvironment(Environment):
         if self._state.bug_2_exists:
             b2 = self._rc.compute_bug2(self._state)
             breakdown["bug_2_total"] = b2["total"]
-            breakdown["total"] = round(breakdown["total"] + b2["total"], 3)
+            breakdown["total"] =breakdown["total"] + b2["total"]
             breakdown.update({f"bug2_{k}": v for k, v in b2.items() if k != "total"})
 
-        # Clamp all breakdown values strictly between 0 and 1
-        for k in list(breakdown.keys()):
-            if breakdown[k] is not None:
-                breakdown[k] = _clamp(float(breakdown[k]))
 
         total = breakdown["total"]
         self._state.cumulative_reward += total
@@ -553,7 +548,7 @@ class CodeNavEnvironment(Environment):
 
         return self._obs(
             success=True,
-            message=f"Episode complete. Score: {total:.3f}",
+            message=f"Episode complete. Score: {total}",
             final_score=total,
             score_breakdown=breakdown,
             done=True,
