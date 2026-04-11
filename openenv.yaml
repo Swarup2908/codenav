@@ -68,7 +68,7 @@ observation_space:
     - tests_run
 
 reward:
-  range: [-1.0, 1.0]
+  range: [0.001, 0.999]
   type: dense
   dimensions:
     - reading
