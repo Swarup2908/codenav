@@ -14,6 +14,32 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from openenv.core.env_server.interfaces import Environment
+try:
+    from openenv.core.rubrics.base import Rubric
+except ImportError:
+    class Rubric:
+        """Fallback Rubric base class if openenv-core version doesn't have it."""
+        def forward(self, action, observation) -> float:
+            return 0.5
+        def __call__(self, action, observation) -> float:
+            return self.forward(action, observation)
+
+
+class CodeNavRubric(Rubric):
+    """Official OpenEnv Rubric for CodeNav — scores strictly between 0 and 1."""
+    
+    def __init__(self):
+        self._last_score = 0.5
+    
+    def forward(self, action, observation) -> float:
+        """Return the last computed score, strictly between 0 and 1."""
+        score = self._last_score
+        # Ensure strictly between 0 and 1
+        score = max(0.11, min(0.89, float(score)))
+        return round(score, 3)
+    
+    def set_score(self, score: float) -> None:
+        self._last_score = max(0.11, min(0.89, float(score)))
 
 try:
     from ..models import CodeNavAction, CodeNavObservation, CodeNavState
@@ -160,6 +186,8 @@ class CodeNavEnvironment(Environment):
         self._task = get_scenario(task_id, scenario_index)
         self._active_task = self._task
         self._reward_computer = RewardComputer()
+        self._rubric = CodeNavRubric()
+        self.rubric = self._rubric  # Expose as OpenEnv standard attribute
         self._state: Optional[CodeNavState] = None
         self._files: Dict[str, str] = {}
         self._wrong_diagnosis_count: int = 0
@@ -535,6 +563,9 @@ class CodeNavEnvironment(Environment):
         total = breakdown["total"]
         self._state.cumulative_reward += total
 
+        # Update the rubric with the final score
+        self._rubric.set_score(total)
+        
         return self._make_obs(
             success=True,
             message=f"Episode complete. Final score: {total:.3f}",
