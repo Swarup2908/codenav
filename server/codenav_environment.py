@@ -181,13 +181,15 @@ class CodeNavEnvironment(Environment):
     def __init__(self, task_id: str = "easy", scenario_index: int = None):
         if task_id not in ("easy", "medium", "hard"):
             raise ValueError(f"task_id must be one of ['easy', 'medium', 'hard']")
+        # Call super().__init__() first per OpenEnv spec
+        self._rubric = CodeNavRubric()
+        super().__init__(rubric=self._rubric)
+        # Then set environment state
         self._task_id = task_id
         self._scenario_index = scenario_index
         self._task = get_scenario(task_id, scenario_index)
         self._active_task = self._task
         self._reward_computer = RewardComputer()
-        self._rubric = CodeNavRubric()
-        self.rubric = self._rubric  # Expose as OpenEnv standard attribute
         self._state: Optional[CodeNavState] = None
         self._files: Dict[str, str] = {}
         self._wrong_diagnosis_count: int = 0
